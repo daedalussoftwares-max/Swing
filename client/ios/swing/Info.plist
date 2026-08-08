@@ -31,12 +31,6 @@
 				<string>com.rahulsaw.swing</string>
 			</array>
 		</dict>
-		<dict>
-			<key>CFBundleURLSchemes</key>
-			<array>
-				<string>exp+swing</string>
-			</array>
-		</dict>
 	</array>
 	<key>CFBundleVersion</key>
 	<string>1</string>
@@ -61,12 +55,8 @@
 	<string>Swing uses the microphone to record voice messages you send in chats.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Swing accesses your photos so you can send them in chats.</string>
-	<key>NSUserActivityTypes</key>
-	<array>
-		<string>$(PRODUCT_BUNDLE_IDENTIFIER).expo.index_route</string>
-	</array>
 	<key>RCTNewArchEnabled</key>
-	<true/>
+	<false/>
 	<key>UILaunchStoryboardName</key>
 	<string>SplashScreen</string>
 	<key>UIRequiredDeviceCapabilities</key>

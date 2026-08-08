@@ -50,7 +50,7 @@ import { ThemedText } from '@/components/themed-text';
 import { Colors, Radii, Spacing } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { humanizeAuthError, useAuth } from '@/lib/auth-context';
-import { isLocalImageUri } from '@/lib/upload-avatar';
+import { isLocalImageUri } from '@/lib/upload-media';
 import { authUserToLocalPatch } from '@/lib/profile-from-auth';
 import { useUserSettings } from '@/lib/user-settings-context';
 import {

@@ -40,13 +40,13 @@ export function googleSetupDevHint(
   androidClientId: string,
 ): string | null {
   if (!webClientId) {
-    return 'Missing EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID in client/.env';
+    return 'Missing SWING_GOOGLE_WEB_CLIENT_ID in client/.env';
   }
   if (Platform.OS === 'ios' && !iosClientId) {
-    return 'Missing EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID — use bundle com.rahulsaw.swing (see GOOGLE-AUTH-SETUP.md)';
+    return 'Missing SWING_GOOGLE_IOS_CLIENT_ID — use bundle com.rahulsaw.swing (see GOOGLE-AUTH-SETUP.md)';
   }
   if (Platform.OS === 'android' && !androidClientId) {
-    return 'Missing EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID — see GOOGLE-AUTH-SETUP.md';
+    return 'Missing SWING_GOOGLE_ANDROID_CLIENT_ID — see GOOGLE-AUTH-SETUP.md';
   }
   return null;
 }

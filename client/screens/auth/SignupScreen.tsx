@@ -29,11 +29,11 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
-  TextInput,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { AuthField } from '@/components/auth-field';
 import { AuthHeroCarousel } from '@/components/auth-hero-carousel';
 import { BlockingLoader } from '@/components/blocking-loader';
 import { GoogleLogo } from '@/components/google-logo';
@@ -131,7 +131,7 @@ export default function SignupScreen() {
           >
             <ThemedText style={styles.title}>Signup</ThemedText>
 
-            <Field
+            <AuthField
               label="Email"
               value={email}
               onChangeText={setEmail}
@@ -141,7 +141,7 @@ export default function SignupScreen() {
               autoComplete="email"
             />
 
-            <Field
+            <AuthField
               label="Password"
               value={password}
               onChangeText={setPassword}
@@ -264,61 +264,6 @@ export default function SignupScreen() {
   );
 }
 
-// ── Shared field component (also used by /signin) ──────────────────────────
-
-export function Field({
-  label,
-  value,
-  onChangeText,
-  placeholder,
-  keyboardType,
-  autoCapitalize = 'none',
-  autoComplete,
-  secureTextEntry,
-  rightAdornment,
-}: {
-  label: string;
-  value: string;
-  onChangeText: (v: string) => void;
-  placeholder?: string;
-  keyboardType?: 'default' | 'email-address' | 'numeric';
-  autoCapitalize?: 'none' | 'sentences' | 'words' | 'characters';
-  autoComplete?: 'email' | 'password' | 'password-new' | 'name' | 'off';
-  secureTextEntry?: boolean;
-  rightAdornment?: React.ReactNode;
-}) {
-  const scheme = useColorScheme() ?? 'light';
-  const c = Colors[scheme];
-  return (
-    <View style={styles.field}>
-      <ThemedText style={[styles.fieldLabel, { color: c.textMuted }]}>
-        {label}
-      </ThemedText>
-      <View
-        style={[
-          styles.fieldInputWrap,
-          { backgroundColor: c.surfaceAlt, borderColor: c.border },
-        ]}
-      >
-        <TextInput
-          value={value}
-          onChangeText={onChangeText}
-          placeholder={placeholder}
-          placeholderTextColor={c.textSubtle}
-          style={[styles.fieldInput, { color: c.text }]}
-          keyboardType={keyboardType}
-          autoCapitalize={autoCapitalize}
-          autoComplete={autoComplete}
-          secureTextEntry={secureTextEntry}
-        />
-        {rightAdornment ? (
-          <View style={styles.fieldAdornment}>{rightAdornment}</View>
-        ) : null}
-      </View>
-    </View>
-  );
-}
-
 // ── Styles ─────────────────────────────────────────────────────────────────
 // Note on button radius: switched from `Radii.pill` (oval) to `Radii.lg`
 // to match the soft-curved card style used on the home screen.
@@ -351,31 +296,6 @@ const styles = StyleSheet.create({
     fontSize: 22,
     fontWeight: '700',
     marginBottom: Spacing.md,
-  },
-  field: {
-    marginBottom: Spacing.md,
-  },
-  fieldLabel: {
-    fontSize: 12,
-    fontWeight: '600',
-    letterSpacing: 0.4,
-    textTransform: 'uppercase',
-    marginBottom: 6,
-  },
-  fieldInputWrap: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    borderRadius: Radii.md,
-    borderWidth: StyleSheet.hairlineWidth,
-    paddingHorizontal: Spacing.md,
-    height: 50,
-  },
-  fieldInput: {
-    flex: 1,
-    fontSize: 15,
-  },
-  fieldAdornment: {
-    paddingLeft: Spacing.sm,
   },
   errorBox: {
     flexDirection: 'row',

@@ -1,18 +1,18 @@
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 
-import SplashScreen from '@/app/(auth)/splash';
-import SignupScreen from '@/app/(auth)/signup';
-import SigninScreen from '@/app/(auth)/signin';
-import ProfileSetupScreen from '@/app/(auth)/profile-setup';
-import ChatScreen from '@/app/chat/[chatId]';
-import NotificationsScreen from '@/app/notifications';
-import PlaneDetailScreen from '@/app/plane/[id]';
-import PlanesScreen from '@/app/planes';
-import ProfileEditScreen from '@/app/profile/edit';
-import ProfileUserScreen from '@/app/profile/[userId]';
-import SettingsScreen from '@/app/settings';
-import StatusScreen from '@/app/status';
-import StoryScreen from '@/app/story/[userId]';
+import NotificationsScreen from '@/screens/NotificationsScreen';
+import SettingsScreen from '@/screens/SettingsScreen';
+import StatusScreen from '@/screens/StatusScreen';
+import SplashScreen from '@/screens/auth/SplashScreen';
+import SigninScreen from '@/screens/auth/SigninScreen';
+import SignupScreen from '@/screens/auth/SignupScreen';
+import ProfileSetupScreen from '@/screens/auth/ProfileSetupScreen';
+import ChatScreen from '@/screens/chat/ChatScreen';
+import PlaneDetailScreen from '@/screens/plane/PlaneDetailScreen';
+import PlanesScreen from '@/screens/plane/PlanesScreen';
+import EditProfileScreen from '@/screens/profile/EditProfileScreen';
+import UserProfileScreen from '@/screens/profile/UserProfileScreen';
+import StoryScreen from '@/screens/story/StoryScreen';
 import { MainTabNavigator } from '@/navigation/MainTabNavigator';
 import type { RootStackParamList } from '@/navigation/types';
 
@@ -33,12 +33,12 @@ export function RootNavigator() {
       />
       <Stack.Screen
         name="ProfileUser"
-        component={ProfileUserScreen}
+        component={UserProfileScreen}
         options={{ animation: 'slide_from_right' }}
       />
       <Stack.Screen
         name="ProfileEdit"
-        component={ProfileEditScreen}
+        component={EditProfileScreen}
         options={{ animation: 'slide_from_right' }}
       />
       <Stack.Screen

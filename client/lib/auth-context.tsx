@@ -23,7 +23,7 @@ import {
   readTokens,
   writeTokens,
 } from '@/lib/api/token-storage';
-import { uploadAndSaveAvatar } from '@/lib/upload-avatar';
+import { uploadAndSaveAvatar } from '@/lib/upload-media';
 
 // ── Public types ──────────────────────────────────────────────────────────
 

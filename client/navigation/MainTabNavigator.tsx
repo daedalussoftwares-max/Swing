@@ -10,11 +10,11 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import ChatsScreen from '@/app/(tabs)/chats';
-import ExploreScreen from '@/app/(tabs)/explore';
-import HomeScreen from '@/app/(tabs)/index';
-import ProfileScreen from '@/app/(tabs)/profile';
-import SendScreen from '@/app/(tabs)/send';
+import ChatsScreen from '@/screens/tabs/ChatsScreen';
+import ExploreScreen from '@/screens/tabs/ExploreScreen';
+import HomeScreen from '@/screens/tabs/HomeScreen';
+import ProfileScreen from '@/screens/tabs/ProfileScreen';
+import SendScreen from '@/screens/tabs/SendScreen';
 import { ThemedText } from '@/components/themed-text';
 import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';

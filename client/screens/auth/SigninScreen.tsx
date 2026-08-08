@@ -34,7 +34,7 @@ import {
   isGoogleSignInCancelled,
 } from '@/lib/google-user-messages';
 
-import { Field } from './signup';
+import { AuthField } from '@/components/auth-field';
 
 export default function SigninScreen() {
   const scheme = useColorScheme() ?? 'light';
@@ -119,7 +119,7 @@ export default function SigninScreen() {
           >
             <ThemedText style={styles.title}>Login</ThemedText>
 
-            <Field
+            <AuthField
               label="Email"
               value={email}
               onChangeText={setEmail}
@@ -128,7 +128,7 @@ export default function SigninScreen() {
               autoComplete="email"
             />
 
-            <Field
+            <AuthField
               label="Password"
               value={password}
               onChangeText={setPassword}
