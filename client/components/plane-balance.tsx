@@ -3,7 +3,7 @@
  * Reads from `usePlaneBalance` so it stays in sync everywhere.
  */
 
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons } from '@/lib/native/vector-icons';
 import { StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';

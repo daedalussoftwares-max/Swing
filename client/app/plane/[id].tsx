@@ -12,9 +12,9 @@
  *   status instead of the sender.
  */
 
-import { Ionicons } from '@expo/vector-icons';
-import * as Haptics from 'expo-haptics';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { Ionicons } from '@/lib/native/vector-icons';
+import * as Haptics from '@/lib/native/haptics';
+import { useLocalSearchParams, useRouter } from '@/lib/router';
 import { useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';

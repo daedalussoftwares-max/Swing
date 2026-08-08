@@ -12,7 +12,7 @@
  * decide when to persist.
  */
 
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons } from '@/lib/native/vector-icons';
 import { useEffect, useState } from 'react';
 import {
   AppState,

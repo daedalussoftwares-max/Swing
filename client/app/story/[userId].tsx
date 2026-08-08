@@ -1,18 +1,15 @@
 /**
- * Story viewer — swipe down or X to close. Remounts per `userId` so
- * opening a second person's story after reload works reliably.
+ * Story viewer — swipe down or X to close.
  */
 
-import { Ionicons } from '@expo/vector-icons';
-import * as Haptics from 'expo-haptics';
-import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import { Ionicons } from '@/lib/native/vector-icons';
+import * as Haptics from '@/lib/native/haptics';
+import { useFocusEffect, useLocalSearchParams, useRouter } from '@/lib/router';
 import { useCallback, useMemo, useRef } from 'react';
-import { Pressable, StyleSheet, View } from 'react-native';
-import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import { PanResponder, Pressable, StyleSheet, View } from 'react-native';
 import Animated, {
   cancelAnimation,
   Easing,
-  runOnJS,
   useAnimatedStyle,
   useSharedValue,
   withTiming,
@@ -85,20 +82,24 @@ function StoryViewerContent({ userId }: { userId: string }) {
     width: `${progress.value * 100}%`,
   }));
 
-  const handleDismiss = () => {
+  const handleDismiss = useCallback(() => {
     Haptics.selectionAsync();
     dismiss();
-  };
+  }, [dismiss]);
 
-  const swipeDown = Gesture.Pan()
-    .activeOffsetY([24, 999])
-    .failOffsetX([-30, 30])
-    .onEnd((e) => {
-      'worklet';
-      if (e.translationY > 72 || e.velocityY > 650) {
-        runOnJS(handleDismiss)();
-      }
-    });
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, g) =>
+          g.dy > 24 && Math.abs(g.dx) < 30,
+        onPanResponderRelease: (_, g) => {
+          if (g.dy > 72 || g.vy > 650) {
+            handleDismiss();
+          }
+        },
+      }),
+    [handleDismiss],
+  );
 
   const topPad = insets.top;
 
@@ -117,43 +118,41 @@ function StoryViewerContent({ userId }: { userId: string }) {
   }
 
   return (
-    <GestureDetector gesture={swipeDown}>
-      <View style={[styles.root, { backgroundColor: '#000' }]}>
-        <View style={[styles.topChrome, { paddingTop: topPad }]}>
-          <View style={styles.progressTrack}>
-            <Animated.View style={[styles.progressFill, barStyle]} />
-          </View>
-
-          <View style={styles.identityRow}>
-            <Avatar
-              name={partner.name}
-              uri={partner.avatarUrl}
-              size={36}
-              hasStatus={false}
-            />
-            <View style={styles.identityText}>
-              <ThemedText style={styles.identityName} numberOfLines={1}>
-                {partner.name}
-              </ThemedText>
-            </View>
-            <Pressable onPress={handleDismiss} hitSlop={12} style={styles.closeHit}>
-              <View style={styles.closeCircle}>
-                <Ionicons name="close" size={20} color="#fff" />
-              </View>
-            </Pressable>
-          </View>
+    <View style={[styles.root, { backgroundColor: '#000' }]} {...panResponder.panHandlers}>
+      <View style={[styles.topChrome, { paddingTop: topPad }]}>
+        <View style={styles.progressTrack}>
+          <Animated.View style={[styles.progressFill, barStyle]} />
         </View>
 
-        <View style={styles.mediaArea}>
+        <View style={styles.identityRow}>
           <Avatar
             name={partner.name}
             uri={partner.avatarUrl}
-            size={160}
+            size={36}
             hasStatus={false}
           />
+          <View style={styles.identityText}>
+            <ThemedText style={styles.identityName} numberOfLines={1}>
+              {partner.name}
+            </ThemedText>
+          </View>
+          <Pressable onPress={handleDismiss} hitSlop={12} style={styles.closeHit}>
+            <View style={styles.closeCircle}>
+              <Ionicons name="close" size={20} color="#fff" />
+            </View>
+          </Pressable>
         </View>
       </View>
-    </GestureDetector>
+
+      <View style={styles.mediaArea}>
+        <Avatar
+          name={partner.name}
+          uri={partner.avatarUrl}
+          size={160}
+          hasStatus={false}
+        />
+      </View>
+    </View>
   );
 }
 

@@ -1,0 +1,53 @@
+# Resolve react_native_pods.rb with node to allow for hoisting
+require Pod::Executable.execute_command('node', ['-p',
+  'require.resolve(
+    "react-native/scripts/react_native_pods.rb",
+    {paths: [process.argv[1]]},
+  )', __dir__]).strip
+
+platform :ios, '15.1'
+prepare_react_native_project!
+
+# fmt 11.0.2 fails to compile with Xcode 26+ (Apple Clang 21).
+def patch_fmt_for_xcode26(installer)
+  fmt_base = File.join(installer.sandbox.root, 'fmt', 'include', 'fmt', 'base.h')
+  return unless File.exist?(fmt_base)
+
+  content = File.read(fmt_base)
+  return if content.include?('Xcode 26 workaround')
+
+  patched = content.gsub(
+    /#elif defined\(__cpp_consteval\)\n#  define FMT_USE_CONSTEVAL 1/,
+    "#elif defined(__cpp_consteval)\n#  define FMT_USE_CONSTEVAL 0  // Xcode 26 workaround"
+  )
+  return if patched == content
+
+  File.chmod(0644, fmt_base)
+  File.write(fmt_base, patched)
+end
+
+linkage = ENV['USE_FRAMEWORKS']
+if linkage != nil
+  Pod::UI.puts "Configuring Pod with #{linkage}ally linked Frameworks".green
+  use_frameworks! :linkage => linkage.to_sym
+end
+
+target 'swing' do
+  config = use_native_modules!
+
+  use_react_native!(
+    :path => config[:reactNativePath],
+    :hermes_enabled => true,
+    :app_path => "#{Pod::Config.instance.installation_root}/..",
+    :privacy_file_aggregation_enabled => true,
+  )
+
+  post_install do |installer|
+    react_native_post_install(
+      installer,
+      config[:reactNativePath],
+      :mac_catalyst_enabled => false,
+    )
+    patch_fmt_for_xcode26(installer)
+  end
+end

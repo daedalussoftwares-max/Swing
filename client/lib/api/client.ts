@@ -2,11 +2,8 @@
  * HTTP client for the Swing Go API.
  */
 
+import { API_URL } from '@/lib/env';
 import { codeFromHttpStatus, messageForApiCode } from '@/lib/api/user-messages';
-
-const API_URL = (
-  process.env.EXPO_PUBLIC_API_URL ?? 'http://10.0.2.2:8080'
-).replace(/\/$/, '');
 
 export class ApiError extends Error {
   readonly code: string;

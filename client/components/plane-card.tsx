@@ -13,7 +13,7 @@
  * is visible on the detail screen.
  */
 
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons } from '@/lib/native/vector-icons';
 import { Pressable, StyleSheet, View } from 'react-native';
 
 import { SwipeSafePressable } from '@/components/swipe-safe-pressable';

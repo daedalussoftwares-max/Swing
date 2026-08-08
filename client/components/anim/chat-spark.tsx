@@ -9,7 +9,7 @@
  * carousel feels rhythmically consistent when the user swipes.
  */
 
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons } from '@/lib/native/vector-icons';
 import { useEffect } from 'react';
 import { StyleSheet, View } from 'react-native';
 import Animated, {

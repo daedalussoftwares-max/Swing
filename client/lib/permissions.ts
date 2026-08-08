@@ -18,8 +18,7 @@
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import * as Location from 'expo-location';
-import * as Notifications from 'expo-notifications';
+import { Location, Notifications } from '@/lib/native/permissions';
 
 const KEY = 'swing/v1/permissions/asked';
 
@@ -144,7 +143,7 @@ export async function runFirstTimePermissionFlow(): Promise<{
   // Small inter-prompt gap so the second native sheet doesn't queue
   // up while the first is still animating away.
   if (notifications.prompted) {
-    await new Promise((r) => setTimeout(r, 600));
+    await new Promise<void>((r) => setTimeout(r, 600));
   }
 
   // ── Location ────────────────────────────────────────────────────

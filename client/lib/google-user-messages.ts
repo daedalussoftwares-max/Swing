@@ -43,7 +43,7 @@ export function googleSetupDevHint(
     return 'Missing EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID in client/.env';
   }
   if (Platform.OS === 'ios' && !iosClientId) {
-    return 'Missing EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID — Expo Go needs bundle host.exp.Exponent (see GOOGLE-AUTH-SETUP.md)';
+    return 'Missing EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID — use bundle com.rahulsaw.swing (see GOOGLE-AUTH-SETUP.md)';
   }
   if (Platform.OS === 'android' && !androidClientId) {
     return 'Missing EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID — see GOOGLE-AUTH-SETUP.md';
@@ -96,7 +96,7 @@ export function humanizeGoogleFailure(
     return new GoogleSignInError(
       GOOGLE_SIGNIN_FAILED,
       rawDetail ??
-        'token exchange failed — use iOS OAuth client with bundle host.exp.Exponent (Expo Go)',
+        'token exchange failed — use iOS OAuth client with bundle com.rahulsaw.swing',
     );
   }
 
@@ -109,7 +109,7 @@ export function humanizeGoogleFailure(
     return new GoogleSignInError(
       GOOGLE_SIGNIN_FAILED,
       rawDetail ??
-        'redirect_uri mismatch — create iOS OAuth client for bundle host.exp.Exponent (Expo Go)',
+        'redirect_uri mismatch — create iOS OAuth client for bundle com.rahulsaw.swing',
     );
   }
 

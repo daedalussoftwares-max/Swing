@@ -11,7 +11,7 @@
  *   - `onPress` / `onLongPress`: makes the avatar pressable.
  */
 
-import { Image } from 'expo-image';
+import { Image } from '@/lib/native/image';
 import { Pressable, StyleSheet, View } from 'react-native';
 
 import { ThemedText } from '@/components/themed-text';

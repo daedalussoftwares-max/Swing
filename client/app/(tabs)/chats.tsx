@@ -6,18 +6,19 @@
  * list with avatar, name, latest message preview, time, unread dot.
  */
 
-import { Ionicons } from '@expo/vector-icons';
-import * as Haptics from 'expo-haptics';
-import { useRouter } from 'expo-router';
+import { Ionicons } from '@/lib/native/vector-icons';
+import * as Haptics from '@/lib/native/haptics';
+import { useRouter } from '@/lib/router';
 import { useCallback, useMemo, useState } from 'react';
 import {
+  FlatList,
   Pressable,
   RefreshControl,
+  ScrollView,
   StyleSheet,
   TextInput,
   View,
 } from 'react-native';
-import { FlatList, ScrollView } from 'react-native-gesture-handler';
 import Animated from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -58,7 +59,7 @@ export default function ChatsScreen() {
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    await new Promise((resolve) => setTimeout(resolve, 650));
+    await new Promise<void>((resolve) => setTimeout(resolve, 650));
     setRefreshing(false);
   }, []);
 

@@ -9,7 +9,7 @@
  * <ChatActionMenu chatId={...} visible={...} onClose={...}/>.
  */
 
-import { useRouter } from 'expo-router';
+import { useRouter } from '@/lib/router';
 import { Alert } from 'react-native';
 
 import { ActionSheet, type ActionSheetItem } from '@/components/action-sheet';

@@ -15,10 +15,10 @@
 import DateTimePicker, {
   type DateTimePickerEvent,
 } from '@react-native-community/datetimepicker';
-import { Ionicons } from '@expo/vector-icons';
-import * as Haptics from 'expo-haptics';
-import * as ImagePicker from 'expo-image-picker';
-import { useFocusEffect, useRouter } from 'expo-router';
+import { Ionicons } from '@/lib/native/vector-icons';
+import * as Haptics from '@/lib/native/haptics';
+import * as ImagePicker from '@/lib/native/image-picker';
+import { useFocusEffect, useRouter } from '@/lib/router';
 import { useCallback, useState } from 'react';
 import {
   ActivityIndicator,

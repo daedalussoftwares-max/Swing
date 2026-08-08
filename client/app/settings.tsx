@@ -11,8 +11,8 @@
  * is a follow-up.
  */
 
-import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { Ionicons } from '@/lib/native/vector-icons';
+import { useRouter } from '@/lib/router';
 import { useState } from 'react';
 import {
   Alert,

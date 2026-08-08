@@ -16,7 +16,7 @@
  *     calm — this is signup, not a game.
  */
 
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons } from '@/lib/native/vector-icons';
 import { useEffect } from 'react';
 import { StyleSheet, View } from 'react-native';
 import Animated, {

@@ -7,9 +7,9 @@
  * this becomes a `doc(users, uid)` read.
  */
 
-import { Ionicons } from '@expo/vector-icons';
-import { Image } from 'expo-image';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { Ionicons } from '@/lib/native/vector-icons';
+import { Image } from '@/lib/native/image';
+import { useLocalSearchParams, useRouter } from '@/lib/router';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 

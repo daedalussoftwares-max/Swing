@@ -16,7 +16,7 @@
  * chat" so the user can decide if they want to dive in now or later.
  */
 
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons } from '@/lib/native/vector-icons';
 import { useEffect } from 'react';
 import { Modal, Pressable, StyleSheet, View } from 'react-native';
 import Animated, {

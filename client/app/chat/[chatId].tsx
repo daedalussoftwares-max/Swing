@@ -38,7 +38,7 @@
  *     multiline input can't get stuck at an over-grown height on resume.
  */
 
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons } from '@/lib/native/vector-icons';
 import {
   AudioModule,
   RecordingPresets,
@@ -46,32 +46,31 @@ import {
   useAudioPlayer,
   useAudioPlayerStatus,
   useAudioRecorder,
-} from 'expo-audio';
-import * as Clipboard from 'expo-clipboard';
-import * as Haptics from 'expo-haptics';
-import { Image } from 'expo-image';
-import * as ImagePicker from 'expo-image-picker';
-import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
+} from '@/lib/native/audio';
+import * as Clipboard from '@/lib/native/clipboard';
+import * as Haptics from '@/lib/native/haptics';
+import { Image } from '@/lib/native/image';
+import * as ImagePicker from '@/lib/native/image-picker';
+import { useLocalSearchParams, useRouter } from '@/lib/router';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   AppState,
+  FlatList,
   Keyboard,
   KeyboardAvoidingView,
   Modal,
+  PanResponder,
   Platform,
   Pressable,
   StyleSheet,
   TextInput,
-  useWindowDimensions,
   View,
 } from 'react-native';
-import { FlatList, Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
   Easing,
   Extrapolation,
   interpolate,
-  runOnJS,
   useAnimatedStyle,
   useSharedValue,
   withDelay,
@@ -792,7 +791,7 @@ export default function ChatScreen() {
 // ===========================================================================
 
 function SwipeableBubble({
-  isMe,
+  isMe: _isMe,
   onReply,
   accentColor,
   mutedColor,
@@ -806,27 +805,29 @@ function SwipeableBubble({
   disabled?: boolean;
   children: React.ReactNode;
 }) {
-  // Swipe right on any bubble to reply (same gesture for sent and
-  // received). Left-only swipes on right-aligned "my" bubbles were
-  // hard to trigger and felt broken on iOS.
   const translateX = useSharedValue(0);
 
-  const pan = Gesture.Pan()
-    .enabled(!disabled)
-    .activeOffsetX([14, 999])
-    .failOffsetY([-10, 10])
-    .onUpdate((e) => {
-      'worklet';
-      const dx = Math.max(0, e.translationX);
-      translateX.value = Math.min(dx, SWIPE_MAX_TRAVEL);
-    })
-    .onEnd((e) => {
-      'worklet';
-      if (e.translationX > SWIPE_REPLY_THRESHOLD) {
-        runOnJS(onReply)();
-      }
-      translateX.value = withTiming(0, { duration: 220 });
-    });
+  const panResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_, g) =>
+          !disabled && g.dx > 14 && Math.abs(g.dy) < 10,
+        onPanResponderMove: (_, g) => {
+          const dx = Math.max(0, g.dx);
+          translateX.value = Math.min(dx, SWIPE_MAX_TRAVEL);
+        },
+        onPanResponderRelease: (_, g) => {
+          if (g.dx > SWIPE_REPLY_THRESHOLD) {
+            onReply();
+          }
+          translateX.value = withTiming(0, { duration: 220 });
+        },
+        onPanResponderTerminate: () => {
+          translateX.value = withTiming(0, { duration: 220 });
+        },
+      }),
+    [disabled, onReply, translateX],
+  );
 
   const bubbleStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: translateX.value }],
@@ -853,7 +854,6 @@ function SwipeableBubble({
 
   return (
     <View style={styles.swipeRow}>
-      {/* Reply icon ghost that fades in behind the bubble. */}
       <Animated.View
         pointerEvents="none"
         style={[styles.swipeIcon, styles.swipeIconLeft, iconStyle]}
@@ -868,9 +868,9 @@ function SwipeableBubble({
         </View>
       </Animated.View>
 
-      <GestureDetector gesture={pan}>
-        <Animated.View style={bubbleStyle}>{children}</Animated.View>
-      </GestureDetector>
+      <Animated.View style={bubbleStyle} {...panResponder.panHandlers}>
+        {children}
+      </Animated.View>
     </View>
   );
 }

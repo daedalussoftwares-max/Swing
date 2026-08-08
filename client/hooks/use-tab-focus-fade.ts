@@ -9,7 +9,7 @@
  *
  * Combined with the bottom tab bar's animated indicator and icon scaling,
  * this gives a clear "kuch hua, tab change ho gaya" feel — without needing
- * react-native-pager-view (which doesn't work inside Expo Go).
+ * full pager-view tab swipes (optional future enhancement).
  *
  * Usage:
  *   const fadeStyle = useTabFocusFade();
@@ -17,7 +17,7 @@
  *   <Animated.View style={[styles.root, fadeStyle]}>...</Animated.View>
  */
 
-import { useFocusEffect, usePathname } from 'expo-router';
+import { useFocusEffect, usePathname } from '@/lib/router';
 import { useCallback } from 'react';
 import {
   useAnimatedStyle,

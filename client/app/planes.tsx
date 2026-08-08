@@ -18,8 +18,8 @@
  * query string.
  */
 
-import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { Ionicons } from '@/lib/native/vector-icons';
+import { useRouter } from '@/lib/router';
 import { useMemo } from 'react';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';

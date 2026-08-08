@@ -3,8 +3,8 @@
  * Profile photos align to the top; chat images stay centred.
  */
 
-import { Ionicons } from '@expo/vector-icons';
-import { Image } from 'expo-image';
+import { Ionicons } from '@/lib/native/vector-icons';
+import { Image } from '@/lib/native/image';
 import {
   Modal,
   Pressable,

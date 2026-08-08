@@ -2,8 +2,8 @@
  * Shared tab-screen header chrome: optional back (previous tab) + children.
  */
 
-import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { Ionicons } from '@/lib/native/vector-icons';
+import { useRouter } from '@/lib/router';
 import { Pressable, StyleSheet, View, type ViewStyle } from 'react-native';
 
 import { Colors, Spacing } from '@/constants/theme';

@@ -15,10 +15,10 @@
  *   - `useSentPlanes`    → planes sent
  */
 
-import { Ionicons } from '@expo/vector-icons';
-import * as Haptics from 'expo-haptics';
-import * as ImagePicker from 'expo-image-picker';
-import { useRouter } from 'expo-router';
+import { Ionicons } from '@/lib/native/vector-icons';
+import * as Haptics from '@/lib/native/haptics';
+import * as ImagePicker from '@/lib/native/image-picker';
+import { useRouter } from '@/lib/router';
 import { useCallback, useMemo, useRef, useState } from 'react';
 import {
   Alert,

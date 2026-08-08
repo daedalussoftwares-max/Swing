@@ -17,8 +17,8 @@
  *     (real rewarded-ad SDK comes later)
  */
 
-import { Ionicons } from '@expo/vector-icons';
-import * as Haptics from 'expo-haptics';
+import { Ionicons } from '@/lib/native/vector-icons';
+import * as Haptics from '@/lib/native/haptics';
 import { useEffect, useRef, useState } from 'react';
 import {
   Keyboard,

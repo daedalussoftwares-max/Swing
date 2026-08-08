@@ -22,12 +22,12 @@
  *     gallery and seeds the first draft.
  */
 
-import { Ionicons } from '@expo/vector-icons';
-import * as Haptics from 'expo-haptics';
-import { Image } from 'expo-image';
-import * as ImagePicker from 'expo-image-picker';
-import { useFocusEffect, useRouter } from 'expo-router';
-import { useVideoPlayer, VideoView } from 'expo-video';
+import { Ionicons } from '@/lib/native/vector-icons';
+import * as Haptics from '@/lib/native/haptics';
+import { Image } from '@/lib/native/image';
+import * as ImagePicker from '@/lib/native/image-picker';
+import { useFocusEffect, useRouter } from '@/lib/router';
+import { useVideoPlayer, VideoView } from '@/lib/native/video';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,

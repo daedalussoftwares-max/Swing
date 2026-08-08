@@ -9,8 +9,8 @@
  * rest of the app.
  */
 
-import { Image } from 'expo-image';
-import { useRouter } from 'expo-router';
+import { Image } from '@/lib/native/image';
+import { useRouter } from '@/lib/router';
 import { useEffect } from 'react';
 import { StyleSheet, View } from 'react-native';
 import Animated, {

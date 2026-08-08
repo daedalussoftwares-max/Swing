@@ -1,37 +1,23 @@
-/**
- * Persist auth tokens in the device secure store (not AsyncStorage).
- */
+import * as SecureStore from '@/lib/native/secure-store';
 
-import * as SecureStore from 'expo-secure-store';
-
-// SecureStore keys: only [A-Za-z0-9._-] — no slashes (expo-secure-store rejects them).
-const ACCESS_KEY = 'swing.auth.access';
-const REFRESH_KEY = 'swing.auth.refresh';
+const ACCESS_KEY = 'access_token';
+const REFRESH_KEY = 'refresh_token';
 
 export async function readTokens(): Promise<{
   accessToken: string | null;
   refreshToken: string | null;
 }> {
-  const [accessToken, refreshToken] = await Promise.all([
-    SecureStore.getItemAsync(ACCESS_KEY),
-    SecureStore.getItemAsync(REFRESH_KEY),
-  ]);
+  const accessToken = await SecureStore.getItemAsync(ACCESS_KEY);
+  const refreshToken = await SecureStore.getItemAsync(REFRESH_KEY);
   return { accessToken, refreshToken };
 }
 
-export async function writeTokens(
-  accessToken: string,
-  refreshToken: string,
-): Promise<void> {
-  await Promise.all([
-    SecureStore.setItemAsync(ACCESS_KEY, accessToken),
-    SecureStore.setItemAsync(REFRESH_KEY, refreshToken),
-  ]);
+export async function writeTokens(accessToken: string, refreshToken: string) {
+  await SecureStore.setItemAsync(ACCESS_KEY, accessToken);
+  await SecureStore.setItemAsync(REFRESH_KEY, refreshToken);
 }
 
-export async function clearTokens(): Promise<void> {
-  await Promise.all([
-    SecureStore.deleteItemAsync(ACCESS_KEY),
-    SecureStore.deleteItemAsync(REFRESH_KEY),
-  ]);
+export async function clearTokens() {
+  await SecureStore.deleteItemAsync(ACCESS_KEY);
+  await SecureStore.deleteItemAsync(REFRESH_KEY);
 }

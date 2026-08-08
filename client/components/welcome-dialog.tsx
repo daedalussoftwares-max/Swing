@@ -17,8 +17,8 @@
  *     they're sequenced).
  */
 
-import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { Ionicons } from '@/lib/native/vector-icons';
+import { useRouter } from '@/lib/router';
 import { Modal, Pressable, StyleSheet, View } from 'react-native';
 import Animated, {
   Easing,

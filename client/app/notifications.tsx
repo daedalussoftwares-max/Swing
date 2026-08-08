@@ -7,8 +7,8 @@
  * swapping the source is the only change needed later.
  */
 
-import { Ionicons } from '@expo/vector-icons';
-import { useRouter } from 'expo-router';
+import { Ionicons } from '@/lib/native/vector-icons';
+import { useRouter } from '@/lib/router';
 import { useEffect } from 'react';
 import { FlatList, Pressable, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';

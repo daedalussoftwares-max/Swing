@@ -1,14 +1,15 @@
 /**
- * Press target that ignores touches that moved — swipes won't fire onPress.
- * Use on list rows inside TabSwipeRegion so horizontal pans switch tabs /
- * segments instead of opening detail screens.
+ * Press target that ignores taps when the finger moved (swipes won't fire onPress).
+ * Uses React Native Pressable — no react-native-gesture-handler Gesture API.
  */
 
-import { type ReactNode, useCallback, useMemo, useState } from 'react';
-import { StyleSheet, type StyleProp, type ViewStyle } from 'react-native';
-import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import Animated from 'react-native-reanimated';
-import { runOnJS } from 'react-native-reanimated';
+import { type ReactNode, useRef, useState } from 'react';
+import {
+  Pressable,
+  StyleSheet,
+  type StyleProp,
+  type ViewStyle,
+} from 'react-native';
 
 const MAX_TAP_DISTANCE = 12;
 
@@ -30,47 +31,8 @@ export function SwipeSafePressable({
   delayLongPress = 320,
 }: Props) {
   const [pressed, setPressed] = useState(false);
-  const setPressedTrue = useCallback(() => setPressed(true), []);
-  const setPressedFalse = useCallback(() => setPressed(false), []);
-
-  const gesture = useMemo(() => {
-    const tap = Gesture.Tap()
-      .maxDistance(MAX_TAP_DISTANCE)
-      .enabled(!disabled && !!onPress)
-      .onBegin(() => {
-        'worklet';
-        runOnJS(setPressedTrue)();
-      })
-      .onFinalize(() => {
-        'worklet';
-        runOnJS(setPressedFalse)();
-      })
-      .onEnd(() => {
-        'worklet';
-        if (onPress) runOnJS(onPress)();
-      });
-
-    if (!onLongPress) return tap;
-
-    const longPress = Gesture.LongPress()
-      .minDuration(delayLongPress)
-      .maxDistance(MAX_TAP_DISTANCE)
-      .enabled(!disabled)
-      .onStart(() => {
-        'worklet';
-        runOnJS(setPressedFalse)();
-        runOnJS(onLongPress)();
-      });
-
-    return Gesture.Exclusive(longPress, tap);
-  }, [
-    delayLongPress,
-    disabled,
-    onLongPress,
-    onPress,
-    setPressedFalse,
-    setPressedTrue,
-  ]);
+  const start = useRef({ x: 0, y: 0 });
+  const moved = useRef(false);
 
   const flatStyle = StyleSheet.flatten([
     style,
@@ -78,8 +40,32 @@ export function SwipeSafePressable({
   ]);
 
   return (
-    <GestureDetector gesture={gesture}>
-      <Animated.View style={flatStyle}>{children}</Animated.View>
-    </GestureDetector>
+    <Pressable
+      disabled={disabled}
+      delayLongPress={delayLongPress}
+      onLongPress={onLongPress}
+      onPressIn={(e) => {
+        moved.current = false;
+        start.current = {
+          x: e.nativeEvent.pageX,
+          y: e.nativeEvent.pageY,
+        };
+        setPressed(true);
+      }}
+      onPressOut={() => setPressed(false)}
+      onTouchMove={(e) => {
+        const dx = Math.abs(e.nativeEvent.pageX - start.current.x);
+        const dy = Math.abs(e.nativeEvent.pageY - start.current.y);
+        if (dx > MAX_TAP_DISTANCE || dy > MAX_TAP_DISTANCE) {
+          moved.current = true;
+        }
+      }}
+      onPress={() => {
+        if (!moved.current && onPress) onPress();
+      }}
+      style={flatStyle}
+    >
+      {children}
+    </Pressable>
   );
 }

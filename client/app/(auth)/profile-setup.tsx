@@ -26,9 +26,9 @@
 import DateTimePicker, {
   type DateTimePickerEvent,
 } from '@react-native-community/datetimepicker';
-import * as Haptics from 'expo-haptics';
-import * as ImagePicker from 'expo-image-picker';
-import { useRouter } from 'expo-router';
+import * as Haptics from '@/lib/native/haptics';
+import * as ImagePicker from '@/lib/native/image-picker';
+import { useRouter } from '@/lib/router';
 import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
@@ -59,7 +59,7 @@ import {
   validateUsername,
 } from '@/lib/usernames';
 
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons } from '@/lib/native/vector-icons';
 
 /**
  * Discriminated union for the username field's UX state. Keeps the

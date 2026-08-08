@@ -17,10 +17,10 @@
  * smoothly slides between positions, not snap.
  */
 
-import { Ionicons } from '@expo/vector-icons';
-import * as Haptics from 'expo-haptics';
-import { Image } from 'expo-image';
-import { useRouter } from 'expo-router';
+import { Ionicons } from '@/lib/native/vector-icons';
+import * as Haptics from '@/lib/native/haptics';
+import { Image } from '@/lib/native/image';
+import { useRouter } from '@/lib/router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   FlatList,
@@ -252,7 +252,7 @@ export default function HomeScreen() {
     setIndex(0);
     scrollX.value = 0;
     listRef.current?.scrollToOffset({ offset: 0, animated: false });
-    await new Promise((resolve) => setTimeout(resolve, 650));
+    await new Promise<void>((resolve) => setTimeout(resolve, 650));
     setRefreshing(false);
   }, [scrollX]);
 

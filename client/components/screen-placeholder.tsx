@@ -7,7 +7,7 @@
  * and applies the tab-focus fade so a switch always feels animated.
  */
 
-import { Ionicons } from '@expo/vector-icons';
+import { Ionicons } from '@/lib/native/vector-icons';
 import type { ComponentProps } from 'react';
 import { StyleSheet, View } from 'react-native';
 import Animated from 'react-native-reanimated';

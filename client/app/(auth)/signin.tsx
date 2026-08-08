@@ -5,10 +5,10 @@
  * wordmark. Only the form's title, copy and primary action differ.
  */
 
-import { Ionicons } from '@expo/vector-icons';
-import * as Haptics from 'expo-haptics';
-import { Image } from 'expo-image';
-import { Link, useRouter } from 'expo-router';
+import { Ionicons } from '@/lib/native/vector-icons';
+import * as Haptics from '@/lib/native/haptics';
+import { Image } from '@/lib/native/image';
+import { Link, useRouter } from '@/lib/router';
 import { useState } from 'react';
 import {
   ActivityIndicator,
