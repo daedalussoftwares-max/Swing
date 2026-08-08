@@ -6,7 +6,6 @@
     "android": "pnpm --dir client android",
     "ios": "pnpm --dir client ios",
     "ios:sim": "pnpm --dir client ios:sim",
-    "web": "pnpm --dir client web",
     "lint": "pnpm --dir client lint"
   }
 }
