@@ -22,6 +22,7 @@ type MeUser struct {
 	AvatarURL       *string `json:"avatarUrl,omitempty"`
 	Provider        string  `json:"provider"`
 	ProfileComplete bool    `json:"profileComplete"`
+	PlanesRemaining int     `json:"planesRemaining"`
 	CreatedAt       string  `json:"createdAt"`
 }
 
@@ -64,6 +65,7 @@ type profileRecord struct {
 	Country         sql.NullString
 	AvatarURL       sql.NullString
 	ProfileComplete bool
+	PlanesRemaining int
 }
 
 func providerFor(a accountCredentials) string {
@@ -82,6 +84,7 @@ func ToMeUser(a accountCredentials, p profileRecord) MeUser {
 		Email:           a.Email.String,
 		Provider:        providerFor(a),
 		ProfileComplete: p.ProfileComplete,
+		PlanesRemaining: p.PlanesRemaining,
 		CreatedAt:       a.CreatedAt.UTC().Format(time.RFC3339),
 	}
 	if p.Username.Valid {

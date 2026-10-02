@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"database/sql/driver"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -42,6 +43,29 @@ func (u UUID) String() string {
 
 func (u UUID) IsZero() bool {
 	return u == UUID{}
+}
+
+// MarshalJSON encodes UUIDs as RFC 4122 strings for API responses.
+func (u UUID) MarshalJSON() ([]byte, error) {
+	return json.Marshal(u.String())
+}
+
+// UnmarshalJSON accepts a quoted UUID string in request bodies.
+func (u *UUID) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	if s == "" {
+		*u = UUID{}
+		return nil
+	}
+	parsed, err := Parse(s)
+	if err != nil {
+		return err
+	}
+	*u = parsed
+	return nil
 }
 
 // Scan implements sql.Scanner for Postgres UUID columns (lib/pq sends 16 raw bytes).

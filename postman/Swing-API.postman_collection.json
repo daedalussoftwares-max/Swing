@@ -1,0 +1,587 @@
+{
+  "info": {
+    "_postman_id": "a1b2c3d4-swing-api-collection",
+    "name": "Swing API",
+    "description": "Swing backend REST API — auth, profile, planes matching engine, status, media.\n\n## Setup\n1. Import this collection + `Swing-Local.postman_environment.json`\n2. Select **Swing — Local** environment (top-right)\n3. Run **Auth → User A → Login** (or Register)\n4. Run **Profile → User A → Complete profile**\n5. Run **Planes → Send plane**\n\nTokens and IDs auto-save to environment variables.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{accessToken}}",
+        "type": "string"
+      }
+    ]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Collection-level pre-request (optional hooks)"
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8080"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health check",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["health"]
+            },
+            "description": "Server liveness probe."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "User A (sender)",
+          "item": [
+            {
+              "name": "Register User A",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "if ([200, 201].includes(pm.response.code)) {",
+                      "  const body = pm.response.json();",
+                      "  if (body.accessToken) pm.environment.set('accessToken', body.accessToken);",
+                      "  if (body.refreshToken) pm.environment.set('refreshToken', body.refreshToken);",
+                      "  if (body.user?.id) pm.environment.set('accountId', body.user.id);",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "auth": { "type": "noauth" },
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"{{userAEmail}}\",\n  \"password\": \"{{userAPassword}}\"\n}"
+                },
+                "url": "{{baseUrl}}/v1/auth/register"
+              },
+              "response": []
+            },
+            {
+              "name": "Login User A",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 200) {",
+                      "  const body = pm.response.json();",
+                      "  if (body.accessToken) pm.environment.set('accessToken', body.accessToken);",
+                      "  if (body.refreshToken) pm.environment.set('refreshToken', body.refreshToken);",
+                      "  if (body.user?.id) pm.environment.set('accountId', body.user.id);",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "auth": { "type": "noauth" },
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"{{userAEmail}}\",\n  \"password\": \"{{userAPassword}}\"\n}"
+                },
+                "url": "{{baseUrl}}/v1/auth/login"
+              },
+              "response": []
+            },
+            {
+              "name": "Refresh token (User A)",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 200) {",
+                      "  const body = pm.response.json();",
+                      "  if (body.accessToken) pm.environment.set('accessToken', body.accessToken);",
+                      "  if (body.refreshToken) pm.environment.set('refreshToken', body.refreshToken);",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "auth": { "type": "noauth" },
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"refreshToken\": \"{{refreshToken}}\"\n}"
+                },
+                "url": "{{baseUrl}}/v1/auth/refresh"
+              },
+              "response": []
+            },
+            {
+              "name": "Logout User A",
+              "request": {
+                "auth": { "type": "noauth" },
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"refreshToken\": \"{{refreshToken}}\"\n}"
+                },
+                "url": "{{baseUrl}}/v1/auth/logout"
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "User B (receiver)",
+          "item": [
+            {
+              "name": "Register User B",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "if ([200, 201].includes(pm.response.code)) {",
+                      "  const body = pm.response.json();",
+                      "  if (body.accessToken) pm.environment.set('accessTokenB', body.accessToken);",
+                      "  if (body.refreshToken) pm.environment.set('refreshTokenB', body.refreshToken);",
+                      "  if (body.user?.id) pm.environment.set('accountIdB', body.user.id);",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "auth": { "type": "noauth" },
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"{{userBEmail}}\",\n  \"password\": \"{{userBPassword}}\"\n}"
+                },
+                "url": "{{baseUrl}}/v1/auth/register"
+              },
+              "response": []
+            },
+            {
+              "name": "Login User B",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "if (pm.response.code === 200) {",
+                      "  const body = pm.response.json();",
+                      "  if (body.accessToken) pm.environment.set('accessTokenB', body.accessToken);",
+                      "  if (body.refreshToken) pm.environment.set('refreshTokenB', body.refreshToken);",
+                      "  if (body.user?.id) pm.environment.set('accountIdB', body.user.id);",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "auth": { "type": "noauth" },
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"email\": \"{{userBEmail}}\",\n  \"password\": \"{{userBPassword}}\"\n}"
+                },
+                "url": "{{baseUrl}}/v1/auth/login"
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "Google login",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"idToken\": \"{{googleIdToken}}\"\n}"
+            },
+            "url": "{{baseUrl}}/v1/auth/google"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Usernames",
+      "item": [
+        {
+          "name": "Check username available",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": "{{baseUrl}}/v1/usernames/{{username}}/available"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Profile",
+      "item": [
+        {
+          "name": "User A",
+          "item": [
+            {
+              "name": "Get me (User A)",
+              "request": {
+                "method": "GET",
+                "url": "{{baseUrl}}/v1/me"
+              },
+              "response": []
+            },
+            {
+              "name": "Complete profile (User A)",
+              "request": {
+                "method": "PATCH",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Rahul\",\n  \"username\": \"{{username}}\",\n  \"dob\": \"2002-01-15\",\n  \"gender\": \"M\",\n  \"bio\": \"Testing Swing from Postman.\",\n  \"interests\": \"music,film,coffee\",\n  \"city\": \"Mumbai\",\n  \"country\": \"India\",\n  \"profileComplete\": true\n}"
+                },
+                "url": "{{baseUrl}}/v1/me"
+              },
+              "response": []
+            },
+            {
+              "name": "Avatar upload URL (User A)",
+              "request": {
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"contentType\": \"image/jpeg\"\n}"
+                },
+                "url": "{{baseUrl}}/v1/me/avatar/upload-url"
+              },
+              "response": []
+            },
+            {
+              "name": "Delete account (User A)",
+              "request": {
+                "method": "DELETE",
+                "url": "{{baseUrl}}/v1/me"
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "User B",
+          "item": [
+            {
+              "name": "Get me (User B)",
+              "request": {
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [{ "key": "token", "value": "{{accessTokenB}}", "type": "string" }]
+                },
+                "method": "GET",
+                "url": "{{baseUrl}}/v1/me"
+              },
+              "response": []
+            },
+            {
+              "name": "Complete profile (User B)",
+              "request": {
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [{ "key": "token", "value": "{{accessTokenB}}", "type": "string" }]
+                },
+                "method": "PATCH",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"Priya\",\n  \"username\": \"{{usernameB}}\",\n  \"dob\": \"2003-06-10\",\n  \"gender\": \"F\",\n  \"bio\": \"Receiver test account.\",\n  \"interests\": \"music,design,walks\",\n  \"city\": \"Pune\",\n  \"country\": \"India\",\n  \"profileComplete\": true\n}"
+                },
+                "url": "{{baseUrl}}/v1/me"
+              },
+              "response": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Planes",
+      "description": "Paper plane matching engine.\n\n**Flow:**\n1. User A → Send plane\n2. Outbox → pending (dummy: auto-accept after ~10s on next outbox fetch)\n3. User B → Inbox → Accept / Reject",
+      "item": [
+        {
+          "name": "Send plane (User A)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if ([200, 201].includes(pm.response.code)) {",
+                  "  const body = pm.response.json();",
+                  "  if (body.plane?.id) pm.environment.set('planeId', body.plane.id);",
+                  "  if (body.plane?.chatId) pm.environment.set('chatId', body.plane.chatId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Hey! What's making you smile today?\",\n  \"filters\": {\n    \"country\": \"India\",\n    \"gender\": \"any\",\n    \"ageRange\": [20, 28]\n  }\n}"
+            },
+            "url": "{{baseUrl}}/v1/planes",
+            "description": "Deducts 1 from planesRemaining. Matches via scoring engine; falls back to dummy users if no real match."
+          },
+          "response": []
+        },
+        {
+          "name": "Send plane — female filter (User A)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if ([200, 201].includes(pm.response.code)) {",
+                  "  const body = pm.response.json();",
+                  "  if (body.plane?.id) pm.environment.set('planeId', body.plane.id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"message\": \"Hi! Love your vibe.\",\n  \"filters\": {\n    \"country\": \"India\",\n    \"gender\": \"female\",\n    \"ageRange\": [20, 25]\n  }\n}"
+            },
+            "url": "{{baseUrl}}/v1/planes"
+          },
+          "response": []
+        },
+        {
+          "name": "Outbox — sent planes (User A)",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/v1/planes/outbox",
+            "description": "Re-fetch after 10+ seconds to see dummy auto-accept (status: accepted, recipientIsDummy: true)."
+          },
+          "response": []
+        },
+        {
+          "name": "Inbox — received planes (User B)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const body = pm.response.json();",
+                  "  if (body.planes?.length > 0) pm.environment.set('planeId', body.planes[0].id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{accessTokenB}}", "type": "string" }]
+            },
+            "method": "GET",
+            "url": "{{baseUrl}}/v1/planes/inbox"
+          },
+          "response": []
+        },
+        {
+          "name": "Accept plane (User B)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const body = pm.response.json();",
+                  "  if (body.plane?.chatId) pm.environment.set('chatId', body.plane.chatId);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{accessTokenB}}", "type": "string" }]
+            },
+            "method": "POST",
+            "url": "{{baseUrl}}/v1/planes/{{planeId}}/accept",
+            "description": "Recipient only. Creates friendship + chat (real users)."
+          },
+          "response": []
+        },
+        {
+          "name": "Reject plane (User B)",
+          "request": {
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{accessTokenB}}", "type": "string" }]
+            },
+            "method": "POST",
+            "url": "{{baseUrl}}/v1/planes/{{planeId}}/reject",
+            "description": "Recipient only. Plane flies to next match."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Status",
+      "item": [
+        {
+          "name": "List my status",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/v1/me/status"
+          },
+          "response": []
+        },
+        {
+          "name": "Status upload URL",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"contentType\": \"image/jpeg\"\n}"
+            },
+            "url": "{{baseUrl}}/v1/me/status/upload-url"
+          },
+          "response": []
+        },
+        {
+          "name": "Create status",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const body = pm.response.json();",
+                  "  if (body.item?.id) pm.environment.set('statusId', body.item.id);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"mediaKey\": \"status/{{accountId}}/YOUR-FILE-UUID.jpg\",\n  \"contentType\": \"image/jpeg\",\n  \"kind\": \"image\"\n}"
+            },
+            "url": "{{baseUrl}}/v1/me/status",
+            "description": "Upload file to presigned URL first, then pass mediaKey here."
+          },
+          "response": []
+        },
+        {
+          "name": "Delete status",
+          "request": {
+            "method": "DELETE",
+            "url": "{{baseUrl}}/v1/me/status/{{statusId}}"
+          },
+          "response": []
+        },
+        {
+          "name": "List account status",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/v1/status/{{accountIdB}}"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Media",
+      "item": [
+        {
+          "name": "Chat media upload URL",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"chatId\": \"{{chatId}}\",\n  \"contentType\": \"image/jpeg\"\n}"
+            },
+            "url": "{{baseUrl}}/v1/media/chat/upload-url"
+          },
+          "response": []
+        },
+        {
+          "name": "Media read URL",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"mediaKey\": \"chat/{{accountId}}/{{chatId}}/file.jpg\"\n}"
+            },
+            "url": "{{baseUrl}}/v1/media/read-url"
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

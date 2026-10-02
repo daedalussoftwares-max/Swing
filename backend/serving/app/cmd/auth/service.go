@@ -68,6 +68,11 @@ func (s *Service) Register(ctx context.Context, email, password string) (AuthRes
 	`, accountID); err != nil {
 		return AuthResponse{}, fmt.Errorf("register insert profile: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO profile_stats (account_id, planes_remaining) VALUES ($1, $2)
+	`, accountID, 5); err != nil {
+		return AuthResponse{}, fmt.Errorf("register insert profile_stats: %w", err)
+	}
 
 	if err := tx.Commit(); err != nil {
 		return AuthResponse{}, err
@@ -152,6 +157,11 @@ func (s *Service) LoginGoogle(ctx context.Context, idToken string) (AuthResponse
 		INSERT INTO profiles (account_id) VALUES ($1)
 	`, accountID); err != nil {
 		return AuthResponse{}, fmt.Errorf("google insert profile: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO profile_stats (account_id, planes_remaining) VALUES ($1, $2)
+	`, accountID, 5); err != nil {
+		return AuthResponse{}, fmt.Errorf("google insert profile_stats: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return AuthResponse{}, err
@@ -388,14 +398,17 @@ func (s *Service) loadAccountProfile(ctx context.Context, accountID stdid.UUID) 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT a.id, a.email, a.password_hash, a.google_sub, a.created_at,
 		       p.account_id, p.username, p.name, p.dob, p.gender, p.bio,
-		       p.interests, p.city, p.country, p.avatar_url, p.profile_complete
+		       p.interests, p.city, p.country, p.avatar_url, p.profile_complete,
+		       COALESCE(ps.planes_remaining, 5)
 		FROM accounts a
 		JOIN profiles p ON p.account_id = a.id
+		LEFT JOIN profile_stats ps ON ps.account_id = a.id
 		WHERE a.id = $1
 	`, accountID).Scan(
 		&a.ID, &a.Email, &a.PasswordHash, &a.GoogleSub, &a.CreatedAt,
 		&p.AccountID, &p.Username, &p.Name, &p.Dob, &p.Gender, &p.Bio,
 		&p.Interests, &p.City, &p.Country, &p.AvatarURL, &p.ProfileComplete,
+		&p.PlanesRemaining,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

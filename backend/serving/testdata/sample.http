@@ -91,3 +91,35 @@ Content-Type: application/json
 ### Delete account
 DELETE http://localhost:8080/v1/me
 Authorization: Bearer TOKEN
+
+### ── Planes ────────────────────────────────────────────────────────────────
+
+### Send plane (uses 1 from planesRemaining)
+POST http://localhost:8080/v1/planes
+Authorization: Bearer {{accessToken}}
+Content-Type: application/json
+
+{
+  "message": "Hey! What's making you smile today?",
+  "filters": {
+    "country": "India",
+    "gender": "any",
+    "ageRange": [20, 28]
+  }
+}
+
+### Sent planes (outbox) — refresh here to see dummy auto-accept after ~10s
+GET http://localhost:8080/v1/planes/outbox
+Authorization: Bearer {{accessToken}}
+
+### Incoming planes (inbox) — use as User B
+GET http://localhost:8080/v1/planes/inbox
+Authorization: Bearer {{accessToken}}
+
+### Accept plane (recipient only — real users)
+POST http://localhost:8080/v1/planes/PLANE_ID_HERE/accept
+Authorization: Bearer {{accessToken}}
+
+### Reject plane (recipient only — plane flies to next match)
+POST http://localhost:8080/v1/planes/PLANE_ID_HERE/reject
+Authorization: Bearer {{accessToken}}

@@ -1,0 +1,21 @@
+# Local Postgres for dev when Neon is unreachable (IPv6 / network issues).
+# Usage:
+#   docker compose up -d
+#   database.url in dev.local.yaml:
+#     postgresql://postgres:swing@127.0.0.1:5432/swing?sslmode=disable
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: swing-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: swing
+      POSTGRES_DB: swing
+    volumes:
+      - swing_pg_data:/var/lib/postgresql/data
+
+volumes:
+  swing_pg_data:

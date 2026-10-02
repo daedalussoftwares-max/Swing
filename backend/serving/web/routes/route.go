@@ -56,6 +56,18 @@ func newAPIHandler() http.Handler {
 		bearer.WithBearerAuth()(http.HandlerFunc(controllers.MediaReadURL)),
 	)
 
+	mux.Handle("POST /v1/planes", bearer.WithBearerAuth()(http.HandlerFunc(controllers.SendPlane)))
+	mux.Handle("GET /v1/planes/inbox", bearer.WithBearerAuth()(http.HandlerFunc(controllers.ListInboxPlanes)))
+	mux.Handle("GET /v1/planes/outbox", bearer.WithBearerAuth()(http.HandlerFunc(controllers.ListOutboxPlanes)))
+	mux.Handle(
+		"POST /v1/planes/{id}/accept",
+		bearer.WithBearerAuth()(http.HandlerFunc(controllers.AcceptPlane)),
+	)
+	mux.Handle(
+		"POST /v1/planes/{id}/reject",
+		bearer.WithBearerAuth()(http.HandlerFunc(controllers.RejectPlane)),
+	)
+
 	return mux
 }
 

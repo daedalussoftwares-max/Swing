@@ -19,6 +19,10 @@ type DB struct {
 }
 
 func Open(ctx context.Context, databaseURL string) (*DB, error) {
+	databaseURL, err := resolveDatabaseURL(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("database url: %w", err)
+	}
 	db, err := sql.Open("postgres", databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("open: %w", err)
@@ -48,6 +52,14 @@ func Open(ctx context.Context, databaseURL string) (*DB, error) {
 	if err := migrateStatusItems(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("status items: %w", err)
+	}
+	if err := migratePlanes(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("planes: %w", err)
+	}
+	if err := migratePlaneEngineV2(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("plane engine v2: %w", err)
 	}
 	if err := migrateFromLegacyUsers(ctx, db); err != nil {
 		_ = db.Close()

@@ -8,6 +8,7 @@ import (
 	"lib/pg"
 
 	"serving/app/cmd/auth"
+	"serving/app/cmd/planes"
 	"serving/app/cmd/status"
 	"serving/app/pkg/r2storage"
 	"serving/config"
@@ -26,6 +27,7 @@ func RunStartupTasks() error {
 	)
 	authSvc := auth.NewService(db.SQL(), tokens, config.GetGoogleClientIDs())
 	statusSvc := status.NewService(db.SQL())
+	planesSvc := planes.NewService(db.SQL())
 
 	var r2Client *r2storage.Client
 	r2Cfg := config.GetR2()
@@ -46,6 +48,6 @@ func RunStartupTasks() error {
 		log.Printf("r2 media storage disabled (missing r2 config)")
 	}
 
-	SetRuntime(db, tokens, authSvc, statusSvc, r2Client)
+	SetRuntime(db, tokens, authSvc, statusSvc, planesSvc, r2Client)
 	return nil
 }
