@@ -97,7 +97,7 @@ func ListMyStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func ListAccountStatus(w http.ResponseWriter, r *http.Request) {
-	_, ok := bearer.UserIDFromContext(r.Context())
+	viewerID, ok := bearer.UserIDFromContext(r.Context())
 	if !ok {
 		httpx.Error(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "Not signed in.")
 		return
@@ -107,8 +107,12 @@ func ListAccountStatus(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", "Invalid account id.")
 		return
 	}
-	items, err := common.Status.ListForAccount(r.Context(), accountID)
+	items, err := common.Status.ListForAccount(r.Context(), viewerID, accountID)
 	if err != nil {
+		if errors.Is(err, status.ErrNotFound) {
+			httpx.Error(w, r, http.StatusNotFound, "NOT_FOUND", "Not found.")
+			return
+		}
 		writeServiceError(w, r, "status.list_account", err)
 		return
 	}

@@ -22,6 +22,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from 'react';
 import { Alert, AppState } from 'react-native';
 
@@ -75,7 +76,6 @@ import {
 import { isPlaneAcceptedNotification } from '@/lib/realtime-notification-sync';
 import { newRequestId } from '@/lib/request-id';
 import { ApiError } from '@/lib/api/client';
-import { getFreshAccessToken } from '@/lib/api/session';
 import { isLocalMediaUri, uploadChatMedia } from '@/lib/upload-media';
 import { logFailure } from '@/lib/debug-logger';
 import type {
@@ -101,9 +101,9 @@ export type SendPayload = {
   viewOnce?: boolean;
 };
 
-type ChatsContextValue = {
-  chats: Chat[];
-  loading: boolean;
+/** Everything you can DO with chats. The object is stable: components that
+ *  only need actions never re-render because a message arrived. */
+export type ChatsActions = {
   refresh: () => Promise<void>;
   getChat: (chatId: string) => Chat | undefined;
   /** Fetches the latest page if not loaded yet, otherwise a delta. */
@@ -131,8 +131,22 @@ type ChatsContextValue = {
   setUserBlockedState: (userId: string, blocked: boolean) => Promise<void>;
   /** In-app banner feed: partner messages for chats not on screen. */
   subscribeIncoming: (fn: IncomingListener) => () => void;
-  /** False until the first chat-list fetch after sign-in finished. */
+};
+
+type ChatsMeta = {
+  loading: boolean;
+  /** False until the first chat-list fetch (or cache restore) after sign-in. */
   loaded: boolean;
+};
+
+/** Back-compat shape of `useChats()` (subscribes to everything). */
+type ChatsContextValue = ChatsActions & ChatsMeta & { chats: Chat[] };
+
+/** Tiny external store: chats live outside React state so each screen can
+ *  subscribe to just the slice it renders (see the selector hooks). */
+type ChatsStore = {
+  get: () => Chat[];
+  subscribe: (fn: () => void) => () => void;
 };
 
 export type IncomingMessageEvent = {
@@ -144,7 +158,9 @@ export type IncomingMessageEvent = {
 
 type IncomingListener = (e: IncomingMessageEvent) => void;
 
-const ChatsContext = createContext<ChatsContextValue | null>(null);
+const ActionsContext = createContext<ChatsActions | null>(null);
+const StoreContext = createContext<ChatsStore | null>(null);
+const MetaContext = createContext<ChatsMeta>({ loading: false, loaded: false });
 
 const PAGE_SIZE = 50;
 /** On-device cache of the chat list (+ latest messages) for instant start. */
@@ -242,12 +258,33 @@ function apiMessageToLocal(m: ApiChatMessage, myUserId: string): ChatMessage {
   return local;
 }
 
-/** Confirmed messages by seq; pending/failed (no seq yet) stay at the end. */
-function compareMessages(a: ChatMessage, b: ChatMessage): number {
-  const sa = a.seq ?? Number.MAX_SAFE_INTEGER;
-  const sb = b.seq ?? Number.MAX_SAFE_INTEGER;
-  if (sa !== sb) return sa - sb;
-  return a.createdAt.localeCompare(b.createdAt);
+/**
+ * Canonical thread order. Confirmed messages are ordered by server seq.
+ * A pending/failed message (no seq yet) keeps the spot where it was sent:
+ * right after the confirmed message it was anchored to (`anchorSeq`), so
+ * later messages appear BELOW a failed one instead of it jumping to the
+ * bottom. Anchoring on seq (not timestamps) is immune to device clock skew.
+ */
+function orderMessages(list: ChatMessage[]): ChatMessage[] {
+  const confirmed: ChatMessage[] = [];
+  const pending: ChatMessage[] = [];
+  for (const m of list) (m.seq != null ? confirmed : pending).push(m);
+  confirmed.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+  if (pending.length === 0) return confirmed;
+  pending.sort((a, b) => {
+    const d = (a.anchorSeq ?? 0) - (b.anchorSeq ?? 0);
+    return d !== 0 ? d : a.createdAt.localeCompare(b.createdAt);
+  });
+  const out: ChatMessage[] = [];
+  let i = 0;
+  for (const m of confirmed) {
+    while (i < pending.length && (pending[i].anchorSeq ?? 0) < (m.seq ?? 0)) {
+      out.push(pending[i++]);
+    }
+    out.push(m);
+  }
+  while (i < pending.length) out.push(pending[i++]);
+  return out;
 }
 
 /** Server copy wins for content, but local-only bits are preserved. */
@@ -277,8 +314,6 @@ function mergeMessages(
   for (const m of existing) {
     if (m.clientMsgId) idByClient.set(m.clientMsgId, m.id);
   }
-  let needsSort = false;
-  const lastSeq = existing.reduce((n, m) => Math.max(n, m.seq ?? 0), 0);
   for (const m of incoming) {
     let prev = byId.get(m.id);
     if (!prev && m.clientMsgId) {
@@ -289,13 +324,8 @@ function mergeMessages(
       }
     }
     byId.set(m.id, reconcile(prev, m));
-    if (!prev || prev.seq !== m.seq || (m.seq ?? 0) <= lastSeq) {
-      needsSort = true;
-    }
   }
-  const merged = [...byId.values()];
-  if (needsSort) merged.sort(compareMessages);
-  return merged;
+  return orderMessages([...byId.values()]);
 }
 
 function maxSeqOf(messages: ChatMessage[]): number {
@@ -319,24 +349,35 @@ function partnerOnline(s: ApiChatSummary): boolean {
 export function ChatsProvider({ children }: { children: ReactNode }) {
   const { status, user } = useAuth();
   const myUserId = user?.id ?? '';
-  const [chats, setChatsState] = useState<Chat[]>([]);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const incomingListeners = useRef(new Set<IncomingListener>());
   const fetchedOnce = useRef(false);
   const cacheUserRef = useRef<string | null>(null);
 
-  // Synchronous mirror of `chats` for async callbacks (avoids stale
-  // closures and the "read state via setState" anti-pattern).
+  // Source of truth for chats. Writes are applied synchronously, so reads
+  // right after a write (even across `await`) see the new value, and only
+  // subscribers whose slice changed re-render.
   const chatsRef = useRef<Chat[]>([]);
-  // All writes go through here and are applied eagerly to the ref, so
-  // reads right after a write (even across `await`) see the new value.
-  const setChats = useCallback((updater: (prev: Chat[]) => Chat[]) => {
-    const next = updater(chatsRef.current);
-    if (next === chatsRef.current) return;
-    chatsRef.current = next;
-    setChatsState(next);
-  }, []);
+  const [listeners] = useState(() => new Set<() => void>());
+  const [store] = useState<ChatsStore>(() => ({
+    get: () => chatsRef.current,
+    subscribe: (fn) => {
+      listeners.add(fn);
+      return () => {
+        listeners.delete(fn);
+      };
+    },
+  }));
+  const setChats = useCallback(
+    (updater: (prev: Chat[]) => Chat[]) => {
+      const next = updater(chatsRef.current);
+      if (next === chatsRef.current) return;
+      chatsRef.current = next;
+      for (const fn of listeners) fn();
+    },
+    [listeners],
+  );
 
   const activeChatRef = useRef<string | null>(null);
   const sendQueues = useRef(new Map<string, Promise<void>>());
@@ -516,14 +557,23 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
   // Persist (debounced) whenever chats change.
   useEffect(() => {
     if (status !== 'signed-in' || !myUserId || !loaded) return;
-    const timer = setTimeout(() => {
-      void AsyncStorage.setItem(
-        CACHE_PREFIX + myUserId,
-        JSON.stringify(toCacheable(chatsRef.current)),
-      ).catch(() => {});
-    }, CACHE_WRITE_DEBOUNCE_MS);
-    return () => clearTimeout(timer);
-  }, [chats, status, myUserId, loaded]);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const persist = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        void AsyncStorage.setItem(
+          CACHE_PREFIX + myUserId,
+          JSON.stringify(toCacheable(chatsRef.current)),
+        ).catch(() => {});
+      }, CACHE_WRITE_DEBOUNCE_MS);
+    };
+    persist();
+    const off = store.subscribe(persist);
+    return () => {
+      off();
+      if (timer) clearTimeout(timer);
+    };
+  }, [store, status, myUserId, loaded]);
 
   const applyIncoming = useCallback(
     (chatId: string, rows: ApiChatMessage[]) => {
@@ -957,13 +1007,7 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
     [],
   );
 
-  const getChat = useCallback(
-    (chatId: string) => {
-      const key = normChatId(chatId);
-      return chats.find((c) => normChatId(c.id) === key);
-    },
-    [chats],
-  );
+  const getChat = useCallback((chatId: string) => findChat(chatId), [findChat]);
 
   const acceptPlane = useCallback(
     async (plane: Plane, chatId: string): Promise<Chat> => {
@@ -1030,7 +1074,7 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
       kind === 'image'
         ? 'image/jpeg'
         : kind === 'audio'
-          ? 'audio/m4a'
+          ? 'audio/mp4'
           : 'application/octet-stream';
     return {
       r2_key: p.mediaKey,
@@ -1081,11 +1125,7 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
       if (p.mediaKey || (p.kind !== 'image' && p.kind !== 'audio')) return;
       const uri = p.kind === 'image' ? p.imageUri : p.audioUri;
       if (!uri || !isLocalMediaUri(uri)) return;
-      const token = await getFreshAccessToken();
-      if (!token) {
-        throw new ApiError('UNAUTHORIZED', 'Please sign in again.');
-      }
-      const uploaded = await uploadChatMedia(token, chatId, uri, p.kind);
+      const uploaded = await uploadChatMedia(chatId, uri, p.kind);
       p.mediaKey = uploaded.mediaKey;
     },
     [],
@@ -1160,7 +1200,7 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
       };
       updateChat(chatId, (chat) => ({
         ...chat,
-        messages: [...chat.messages, optimistic],
+        messages: [...chat.messages, { ...optimistic, anchorSeq: maxSeqOf(chat.messages) }],
       }));
       setTyping(chatId, false);
       await deliver(chatId, clientMsgId);
@@ -1174,13 +1214,15 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
       updateChat(chatId, (chat) => {
         const idx = chat.messages.findIndex((m) => m.clientMsgId === clientMsgId);
         if (idx < 0) return chat;
-        // Move to the end: it will get the next seq on the server.
+        // Re-sending gives it the next seq on the server, so it moves to
+        // the bottom now (same as WhatsApp).
+        const rest = chat.messages.filter((_, i) => i !== idx);
         const msg: ChatMessage = {
           ...chat.messages[idx],
           status: 'sending',
           createdAt: nowIso(),
+          anchorSeq: maxSeqOf(rest),
         };
-        const rest = chat.messages.filter((_, i) => i !== idx);
         return { ...chat, messages: [...rest, msg] };
       });
       void deliver(chatId, clientMsgId);
@@ -1374,10 +1416,8 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const value = useMemo<ChatsContextValue>(
+  const actions = useMemo<ChatsActions>(
     () => ({
-      chats,
-      loading,
       refresh,
       getChat,
       loadMessages,
@@ -1401,11 +1441,8 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
       unblockChat,
       setUserBlockedState,
       subscribeIncoming,
-      loaded,
     }),
     [
-      chats,
-      loading,
       refresh,
       getChat,
       loadMessages,
@@ -1429,22 +1466,75 @@ export function ChatsProvider({ children }: { children: ReactNode }) {
       unblockChat,
       setUserBlockedState,
       subscribeIncoming,
-      loaded,
     ],
   );
 
+  const meta = useMemo<ChatsMeta>(() => ({ loading, loaded }), [loading, loaded]);
+
   return (
-    <ChatsContext.Provider value={value}>
-      {children}
-      {status === 'signed-in' ? <InAppMessageBanner /> : null}
-    </ChatsContext.Provider>
+    <StoreContext.Provider value={store}>
+      <ActionsContext.Provider value={actions}>
+        <MetaContext.Provider value={meta}>
+          {children}
+          {status === 'signed-in' ? <InAppMessageBanner /> : null}
+        </MetaContext.Provider>
+      </ActionsContext.Provider>
+    </StoreContext.Provider>
   );
 }
 
-export function useChats(): ChatsContextValue {
-  const ctx = useContext(ChatsContext);
-  if (!ctx) {
-    throw new Error('useChats must be used inside <ChatsProvider>');
-  }
+function useStore(): ChatsStore {
+  const store = useContext(StoreContext);
+  if (!store) throw new Error('Chats hooks must be used inside <ChatsProvider>');
+  return store;
+}
+
+/** Stable actions — never re-renders on chat updates. */
+export function useChatsActions(): ChatsActions {
+  const ctx = useContext(ActionsContext);
+  if (!ctx) throw new Error('useChatsActions must be used inside <ChatsProvider>');
   return ctx;
+}
+
+/** Loading flags (change only around fetches). */
+export function useChatsMeta(): ChatsMeta {
+  return useContext(MetaContext);
+}
+
+/** Full chat list — re-renders whenever any chat changes. */
+export function useChatList(): Chat[] {
+  const store = useStore();
+  return useSyncExternalStore(store.subscribe, store.get);
+}
+
+/** One chat — re-renders only when THAT chat changes. */
+export function useChat(chatId: string | null | undefined): Chat | undefined {
+  const store = useStore();
+  const key = chatId ? normChatId(chatId) : null;
+  const getSnapshot = useCallback(
+    () => (key ? store.get().find((c) => normChatId(c.id) === key) : undefined),
+    [store, key],
+  );
+  return useSyncExternalStore(store.subscribe, getSnapshot);
+}
+
+/** Unread total for the tab badge — re-renders only when the number changes. */
+export function useChatsUnreadTotal(): number {
+  const store = useStore();
+  const getSnapshot = useCallback(
+    () => store.get().reduce((sum, c) => sum + (c.isBlocked ? 0 : c.unreadCount), 0),
+    [store],
+  );
+  return useSyncExternalStore(store.subscribe, getSnapshot);
+}
+
+/**
+ * @deprecated Subscribes to every chat change. Prefer `useChatsActions` +
+ * `useChat` / `useChatList` / `useChatsUnreadTotal`.
+ */
+export function useChats(): ChatsContextValue {
+  const actions = useChatsActions();
+  const meta = useChatsMeta();
+  const chats = useChatList();
+  return useMemo(() => ({ ...actions, ...meta, chats }), [actions, meta, chats]);
 }

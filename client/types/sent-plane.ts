@@ -27,6 +27,7 @@ export type SentPlaneRecipient = {
   avatarUrl?: string;
   /** Optional short location string for the detail view. */
   location?: string;
+  age?: number;
 };
 
 export type SentPlane = {

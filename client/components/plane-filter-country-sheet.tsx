@@ -21,7 +21,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { ThemedText } from '@/components/themed-text';
 import { Colors, Radii, Spacing } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { COUNTRIES } from '@/lib/countries';
+import { COUNTRIES, withFlag } from '@/lib/countries';
 
 type Props = {
   visible: boolean;
@@ -32,10 +32,10 @@ type Props = {
 
 type Row = { key: string; label: string; value: string | null };
 
-const ANYWHERE: Row = { key: '__anywhere__', label: 'Anywhere', value: null };
+const ANYWHERE: Row = { key: '__anywhere__', label: '🌍 Anywhere', value: null };
 const ALL_ROWS: Row[] = [
   ANYWHERE,
-  ...[...COUNTRIES].sort().map((c) => ({ key: c, label: c, value: c })),
+  ...[...COUNTRIES].sort().map((c) => ({ key: c, label: withFlag(c), value: c })),
 ];
 
 export function CountrySheet({ visible, value, onSelect, onClose }: Props) {

@@ -106,7 +106,7 @@ export default function SignupScreen() {
   };
 
   const canSubmit =
-    email.trim().length > 3 && password.length >= 6 && !submitting;
+    email.trim().length > 3 && password.length >= 8 && !submitting;
 
   return (
     <SafeAreaView
@@ -151,7 +151,7 @@ export default function SignupScreen() {
               label="Password"
               value={password}
               onChangeText={setPassword}
-              placeholder="At least 6 characters"
+              placeholder="At least 8 characters"
               secureTextEntry={!showPassword}
               autoCapitalize="none"
               autoComplete="password-new"

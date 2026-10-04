@@ -53,10 +53,15 @@ func (s *Service) OpenViewOnce(
 	if err != nil || meta == nil {
 		return "", time.Time{}, ErrMessageNotFound
 	}
-	signed := s.signMedia(ctx, meta)
-	if signed == nil || signed.URL == "" {
+	if s.r2 == nil || meta.R2Key == "" {
 		return "", time.Time{}, errors.New("media unavailable")
 	}
+	url, err := s.r2.PresignGetTTL(ctx, meta.R2Key, viewOnceURLTTL)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	// Burn the file itself once the short link has expired.
+	s.deleteMediaLater(meta, viewOnceDeleteAfter)
 	if s.hub != nil {
 		payload := map[string]any{
 			"chatId":    chatID.String(),
@@ -66,5 +71,5 @@ func (s *Service) OpenViewOnce(
 		s.broadcastToPartner(ctx, accountID, partnerID, "message.viewed", payload)
 		s.hub.BroadcastToUser(accountID, "message.viewed", payload)
 	}
-	return signed.URL, now, nil
+	return url, now, nil
 }

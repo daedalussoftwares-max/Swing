@@ -3,15 +3,11 @@ package pg
 import (
 	"context"
 	"database/sql"
-	_ "embed"
 	"fmt"
 	"time"
 
 	_ "github.com/lib/pq"
 )
-
-//go:embed schema.sql
-var schemaSQL string
 
 // DB wraps database/sql for Postgres (driver lives in lib module only).
 type DB struct {
@@ -37,49 +33,9 @@ func Open(ctx context.Context, databaseURL string) (*DB, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("ping: %w", err)
 	}
-	if err := prepareForSchema(ctx, db); err != nil {
+	if err := Migrate(ctx, db); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("prepare schema: %w", err)
-	}
-	if _, err := db.ExecContext(ctx, schemaSQL); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("schema: %w", err)
-	}
-	if err := migrateProfileColumns(ctx, db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("profile columns: %w", err)
-	}
-	if err := migrateStatusItems(ctx, db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("status items: %w", err)
-	}
-	if err := migratePlanes(ctx, db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("planes: %w", err)
-	}
-	if err := migratePlaneEngineV2(ctx, db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("plane engine v2: %w", err)
-	}
-	if err := migrateChatMessaging(ctx, db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("chat messaging: %w", err)
-	}
-	if err := migrateChatV2(ctx, db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("chat v2: %w", err)
-	}
-	if err := migratePlanesV3(ctx, db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("planes v3: %w", err)
-	}
-	if err := migrateChatV3(ctx, db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("chat v3: %w", err)
-	}
-	if err := migrateFromLegacyUsers(ctx, db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("legacy migrate: %w", err)
+		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	return &DB{sql: db}, nil
 }

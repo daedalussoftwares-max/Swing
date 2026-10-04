@@ -5,7 +5,7 @@
  *   - Chats tab (long-press on a row)
  *   - Chat thread (three-dots in the header)
  *
- * Talks to `useChats()` directly so the host just has to render
+ * Talks to the chats store directly so the host just has to render
  * <ChatActionMenu chatId={...} visible={...} onClose={...}/>.
  */
 
@@ -15,7 +15,7 @@ import { Alert } from 'react-native';
 
 import { ActionSheet, type ActionSheetItem } from '@/components/action-sheet';
 import { ReportSheet } from '@/components/report-sheet';
-import { useChats } from '@/lib/chats-context';
+import { useChat, useChatsActions } from '@/lib/chats-context';
 
 type Props = {
   chatId: string | null;
@@ -28,17 +28,11 @@ type Props = {
 
 export function ChatActionMenu({ chatId, visible, onClose, popOnDelete }: Props) {
   const router = useRouter();
-  const {
-    getChat,
-    pinChat,
-    unpinChat,
-    deleteChat,
-    blockChat,
-    unblockChat,
-  } = useChats();
+  const { pinChat, unpinChat, deleteChat, blockChat, unblockChat } =
+    useChatsActions();
 
   const [reporting, setReporting] = useState(false);
-  const chat = chatId ? getChat(chatId) : undefined;
+  const chat = useChat(chatId);
   if (!chat) {
     return (
       <ActionSheet visible={visible} items={[]} onClose={onClose} />

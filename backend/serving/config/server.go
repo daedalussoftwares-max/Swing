@@ -28,3 +28,9 @@ func GetServerReadTimeout() time.Duration {
 func GetServerWriteTimeout() time.Duration {
 	return selected.writeTimeout
 }
+
+// TrustProxy reports whether X-Forwarded-For may be used for client IPs
+// (server.trust_proxy, default false).
+func TrustProxy() bool {
+	return selected.Server.TrustProxy
+}

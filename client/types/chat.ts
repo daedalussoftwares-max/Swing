@@ -21,6 +21,9 @@ export type ChatMessageKind = 'text' | 'image' | 'audio';
 export type ChatMessage = {
   id: string;
   seq?: number;
+  /** For unsent (pending/failed) messages: seq of the newest confirmed
+   *  message when it was composed — keeps its position in the thread. */
+  anchorSeq?: number;
   clientMsgId?: string;
   /** Sender of this individual message. `'me'` for the local user,
    *  otherwise the partner's user id. */

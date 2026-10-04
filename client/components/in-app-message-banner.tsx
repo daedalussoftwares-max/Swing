@@ -13,15 +13,14 @@ import { Avatar } from '@/components/avatar';
 import { ThemedText } from '@/components/themed-text';
 import { Colors, Radii, Spacing } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { type IncomingMessageEvent, useChats } from '@/lib/chats-context';
+import { type IncomingMessageEvent, useChatsActions } from '@/lib/chats-context';
 import * as Haptics from '@/lib/native/haptics';
-import { useRouter } from '@/lib/router';
+import { navigationRef } from '@/lib/router';
 
 const VISIBLE_MS = 3500;
 
 export function InAppMessageBanner() {
-  const { subscribeIncoming } = useChats();
-  const router = useRouter();
+  const { subscribeIncoming } = useChatsActions();
   const insets = useSafeAreaInsets();
   const scheme = useColorScheme() ?? 'light';
   const c = Colors[scheme];
@@ -74,7 +73,10 @@ export function InAppMessageBanner() {
           style={styles.row}
           onPress={() => {
             hide();
-            router.push(`/chat/${current.chatId}`);
+            // Rendered outside the navigator, so navigate via the root ref.
+            if (navigationRef.isReady()) {
+              navigationRef.navigate('Chat', { chatId: current.chatId });
+            }
           }}
           accessibilityRole="button"
           accessibilityLabel={`New message from ${current.partnerName}`}

@@ -3,6 +3,10 @@ import { CommonActions, NavigationContainer } from '@react-navigation/native';
 import { useEffect } from 'react';
 import { ActivityIndicator, StatusBar, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import {
+  initialWindowMetrics,
+  SafeAreaProvider,
+} from 'react-native-safe-area-context';
 
 import { AuthProfileSync } from '@/components/auth-profile-sync';
 import { PushBootstrap } from '@/components/push-bootstrap';
@@ -115,15 +119,19 @@ function AppShell() {
 export default function App() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <AuthProvider>
-        <UserSettingsProvider>
-          <AuthProfileSync />
-          <PushBootstrap />
-          <NavigationContainer ref={navigationRef}>
-            <AppShell />
-          </NavigationContainer>
-        </UserSettingsProvider>
-      </AuthProvider>
+      {/* Root provider: overlays rendered outside the navigator (e.g. the
+          in-app message banner) need safe-area insets too. */}
+      <SafeAreaProvider initialMetrics={initialWindowMetrics}>
+        <AuthProvider>
+          <UserSettingsProvider>
+            <AuthProfileSync />
+            <PushBootstrap />
+            <NavigationContainer ref={navigationRef}>
+              <AppShell />
+            </NavigationContainer>
+          </UserSettingsProvider>
+        </AuthProvider>
+      </SafeAreaProvider>
     </GestureHandlerRootView>
   );
 }

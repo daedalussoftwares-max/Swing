@@ -8,6 +8,8 @@ const BY_CODE: Record<string, string> = {
     'An account with this email already exists. Try logging in.',
   USER_NOT_FOUND: 'No account with this email. Create one?',
   WRONG_PASSWORD: 'Incorrect password.',
+  INVALID_CREDENTIALS: 'Email or password is incorrect.',
+  RATE_LIMITED: "You're going a bit fast. Wait a moment and try again.",
   INVALID_TOKEN: 'Session expired. Please sign in again.',
   INVALID_INPUT: 'Please check your email and password.',
   INVALID_BODY: 'Please check your input and try again.',
@@ -38,6 +40,7 @@ const TRUST_SERVER_MESSAGE = new Set([
   'EMAIL_IN_USE',
   'USER_NOT_FOUND',
   'WRONG_PASSWORD',
+  'INVALID_CREDENTIALS',
   'INVALID_TOKEN',
   'INVALID_INPUT',
   'INVALID_BODY',
@@ -83,6 +86,7 @@ export function codeFromHttpStatus(status: number): string {
   if (status >= 500) return 'INTERNAL';
   if (status === 401) return 'UNAUTHORIZED';
   if (status === 409) return 'EMAIL_IN_USE';
+  if (status === 429) return 'RATE_LIMITED';
   if (status >= 400) return 'INVALID_BODY';
   return 'UNKNOWN';
 }

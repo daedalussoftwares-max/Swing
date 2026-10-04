@@ -193,12 +193,15 @@ func validateMediaSize(t string, media *MediaMeta) error {
 	return nil
 }
 
-// ensureMediaKeyOwned validates chat-scoped R2 keys when R2 is configured.
-func (s *Service) ensureMediaKeyOwned(ctx context.Context, accountID, chatID stdid.UUID, key string) error {
+// ensureMediaKeyOwned: a message may only reference files the sender
+// uploaded into THIS chat (chat/<sender>/<chatID>/...), so nobody can
+// attach someone else's media by guessing or reusing a key.
+func (s *Service) ensureMediaKeyOwned(_ context.Context, accountID, chatID stdid.UUID, key string) error {
 	if s.r2 == nil || key == "" {
 		return nil
 	}
-	if !strings.HasPrefix(key, string(r2storage.ScopeChat)+"/") {
+	if strings.Contains(key, "..") ||
+		!strings.HasPrefix(key, r2storage.ChatKeyPrefix(accountID, chatID.String())) {
 		return ErrInvalidInput
 	}
 	return nil

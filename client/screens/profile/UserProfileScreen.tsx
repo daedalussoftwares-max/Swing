@@ -32,9 +32,10 @@ import { type ApiPublicProfile, getUserProfile } from '@/lib/api/chats-api';
 import { ApiError } from '@/lib/api/client';
 import { useAuth } from '@/lib/auth-context';
 import { getInitials } from '@/lib/initials';
-import { useChats } from '@/lib/chats-context';
+import { useChatList, useChatsActions } from '@/lib/chats-context';
 import { lookupSender } from '@/lib/planes-mapper';
 import { useInboxPlanes } from '@/lib/inbox-planes-context';
+import { withFlag } from '@/lib/countries';
 
 type ViewModel = {
   id: string;
@@ -91,7 +92,8 @@ export default function UserProfileScreen() {
   const auth = useAuth();
 
   const { profileCache } = useInboxPlanes();
-  const { chats, setUserBlockedState } = useChats();
+  const { setUserBlockedState } = useChatsActions();
+  const chats = useChatList();
   const chat = userId ? chats.find((x) => x.partner.id === userId) : undefined;
   const cached = userId ? (lookupSender(profileCache, userId) ?? chat?.partner) : undefined;
 
@@ -216,7 +218,7 @@ export default function UserProfileScreen() {
   const meta = [
     user.age != null ? String(user.age) : null,
     user.gender ? (GENDER_LABEL[user.gender] ?? user.gender) : null,
-    [user.city, user.country].filter(Boolean).join(', ') || null,
+    [user.city, user.country ? withFlag(user.country) : null].filter(Boolean).join(', ') || null,
   ].filter(Boolean);
 
   return (

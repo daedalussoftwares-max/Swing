@@ -1,53 +1,61 @@
 /**
- * Send screen — write a note, pick who should catch it, launch.
+ * Send screen — "sticky note, swipe up":
  *
  *   ┌───────────────────────────────┐
- *   │ Send a plane            ✈ 4   │  header + balance pill
- *   │ ┌───────────────────────────┐ │
- *   │ │ ✈ To: someone new         │ │  composer "postcard"
- *   │ │ ───────────────────────── │ │  ruled lines, char meter
- *   │ └───────────────────────────┘ │
- *   │ Who catches it?   Anyone · …  │  filters (gender / age /
- *   │ [Any][Female][Male][NB]       │  distance / country)
- *   │ ( Launch plane ✈ )            │
- *   │ ✈ Flying — finding someone…   │  live status of last plane
+ *   │ [⚙]                     ✈ 4   │  filters button + balance
+ *   │      To  Anyone · anywhere ⌄  │
+ *   │    ┌─────────────────────┐    │
+ *   │    │ Tell me one thing…  │    │  off-white paper note, slightly
+ *   │    │              42/200 │    │  tilted, editable
+ *   │    └─────────────────────┘    │
+ *   │              ⌃                │
+ *   │       Swipe up to send        │
  *   └───────────────────────────────┘
  *
- * Sending is optimistic: tap → haptic → the note folds into a plane and
- * flies off along `planePath` while POST /v1/planes runs in the
- * background (`useSentPlanes().launch`). On failure the message comes
- * back into the composer, the balance is restored and a toast explains.
+ * Swipe the note up (it follows the finger) → its corners fold in and it
+ * becomes a paper plane that hovers for a moment with a Cancel button →
+ * then it takes off like a rocket and POST /v1/planes fires. Cancel
+ * unfolds it back into the note. The text is kept after sending so it can
+ * be re-used; "Clear" empties it. A "Plane sent!" modal (✕ to close) shows
+ * the plane's live status.
  */
 
 import * as Haptics from '@/lib/native/haptics';
 import { Ionicons } from '@/lib/native/vector-icons';
+import { useNavigation } from '@react-navigation/native';
 import { useRouter } from '@/lib/router';
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
   Keyboard,
-  Platform,
+  Modal,
+  PanResponder,
   Pressable,
   ScrollView,
   StyleSheet,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import Animated, {
   Easing,
+  Extrapolation,
+  FadeIn,
   FadeInDown,
-  FadeOut,
-  interpolateColor,
+  interpolate,
   runOnJS,
+  useAnimatedKeyboard,
   useAnimatedStyle,
   useSharedValue,
   withDelay,
+  withRepeat,
   withSequence,
   withSpring,
   withTiming,
 } from 'react-native-reanimated';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { Avatar } from '@/components/avatar';
 import { PlaneBalance } from '@/components/plane-balance';
 import { FilterChipRow } from '@/components/plane-filter-chips';
 import { CountrySheet } from '@/components/plane-filter-country-sheet';
@@ -66,28 +74,42 @@ import {
   summarizeFilters,
   toApiFilters,
 } from '@/components/plane-filter-model';
-import {
-  FlyingDots,
-  passedOnLabel,
-  planeStatusMeta,
-} from '@/components/plane-status';
-import { PlaneTrail } from '@/components/plane-trail';
+import { FlyingDots } from '@/components/plane-status';
 import { TabNavHeader } from '@/components/tab-nav-header';
-import { TabSwipeRegion } from '@/components/tab-swipe-region';
 import { ThemedText } from '@/components/themed-text';
 import { Colors, Radii, Spacing } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useRefreshOnFocus } from '@/hooks/use-refresh-on-focus';
-import { useTabFocusFade } from '@/hooks/use-tab-focus-fade';
 import { syncLocationIfNeeded } from '@/lib/location';
 import { usePlaneBalance } from '@/lib/plane-balance-context';
-import { PLANE_ICON_ROTATION_OFFSET, planePath } from '@/lib/plane-path';
 import type { LiveSentPlane } from '@/lib/planes-mapper';
 import { type LaunchResult, useSentPlanes } from '@/lib/sent-planes-context';
+import { countryFlag, withFlag } from '@/lib/countries';
 
 const MAX_LENGTH = 200;
-const LINE_HEIGHT = 28;
-const PLANE_SIZE = 72;
+/** Drag the note up this far (or flick) to send. */
+const SWIPE_SEND_PX = 120;
+const SWIPE_SEND_VELOCITY = 1.1;
+/** How high the folded plane hovers while Cancel is offered. */
+const HOVER_LIFT = 40;
+const FOLD_MS = 520;
+/** Time to change your mind before it takes off on its own. */
+const UNDO_MS = 2500;
+const LAUNCH_MS = 750;
+
+type Phase = 'idle' | 'folded' | 'flying';
+
+/** The plane the "sent" modal follows (key = temp id, id = real id). */
+type SentInfo = {
+  key: string;
+  id: string;
+};
+
+/** Off-white "paper" that reads as a sheet on top of the page background. */
+const PAPER = {
+  light: { bg: '#FBF8F1', border: '#ECE6D8', fold: '#EFE8D7', shadow: '#7A6A45' },
+  dark: { bg: '#1C1B19', border: '#2E2C28', fold: '#2A2824', shadow: '#000000' },
+} as const;
 
 type Palette = (typeof Colors)['light'];
 
@@ -109,7 +131,7 @@ function toastForFailure(
         id,
         icon: 'paper-plane-outline',
         title: "You're out of planes",
-        body: 'Your note is back in the composer. Grab more planes and launch it again.',
+        body: 'Your letter is still here. Grab more planes and send it again.',
         tone: 'warning',
       };
     case 'NETWORK':
@@ -117,7 +139,7 @@ function toastForFailure(
         id,
         icon: 'cloud-offline-outline',
         title: "Couldn't reach Swing",
-        body: 'Your note is safe in the composer — check your connection and tap Launch to retry.',
+        body: 'Your letter is still here — check your connection and tap Send to retry.',
         tone: 'danger',
       };
     case 'INVALID_INPUT':
@@ -134,7 +156,7 @@ function toastForFailure(
         id,
         icon: 'alert-circle-outline',
         title: "Couldn't send your plane",
-        body: 'Your note is back in the composer — tap Launch to try again.',
+        body: 'Your letter is still here — tap Send to try again.',
         tone: 'danger',
       };
   }
@@ -143,8 +165,9 @@ function toastForFailure(
 export default function SendScreen() {
   const scheme = useColorScheme() ?? 'light';
   const c = Colors[scheme];
+  const paper = PAPER[scheme];
   const router = useRouter();
-  const fadeStyle = useTabFocusFade();
+  const { height: windowHeight } = useWindowDimensions();
   const { count, refresh: refreshBalance } = usePlaneBalance();
   const { launch, sentPlanes, refresh: refreshSent } = useSentPlanes();
 
@@ -157,11 +180,28 @@ export default function SendScreen() {
   const [filters, setFilters] = useState<PlaneFilterState>(DEFAULT_FILTERS);
   const [filtersLoaded, setFiltersLoaded] = useState(false);
   const [countryOpen, setCountryOpen] = useState(false);
-  /** Last launched plane: `key` = its temp id (stable across the swap), `id` = current id. */
-  const [last, setLast] = useState<{ key: string; id: string } | null>(null);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
-  const [flyingText, setFlyingText] = useState('');
+  /** idle → (swipe) folded: plane hovers, Cancel available → flying → idle */
+  const [phase, setPhase] = useState<Phase>('idle');
+  /** Plane shown in the "sent" confirmation (key = temp id, id = real id). */
+  const [sent, setSent] = useState<SentInfo | null>(null);
+  const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const toastSeq = useRef(0);
+
+  useEffect(
+    () => () => {
+      for (const t of timers.current) clearTimeout(t);
+    },
+    [],
+  );
+  const later = useCallback((fn: () => void, ms: number) => {
+    timers.current.push(setTimeout(fn, ms));
+  }, []);
+  const clearTimers = useCallback(() => {
+    for (const t of timers.current) clearTimeout(t);
+    timers.current = [];
+  }, []);
 
   // ── Filters: restore last-used, persist on change ──────────────────────
   useEffect(() => {
@@ -207,144 +247,32 @@ export default function SendScreen() {
     setCountryOpen(true);
   }, []);
   const closeCountry = useCallback(() => setCountryOpen(false), []);
+  const openFilters = useCallback(() => {
+    void Haptics.selectionAsync();
+    Keyboard.dismiss();
+    setFiltersOpen(true);
+  }, []);
+  const closeFilters = useCallback(() => setFiltersOpen(false), []);
 
-  // ── Fly-away animation (all UI thread) ─────────────────────────────────
-  const rootRef = useRef<View>(null);
-  const composerRef = useRef<View>(null);
+  // ── Toast ──────────────────────────────────────────────────────────────
+  const showToast = useCallback((t: Omit<ToastState, 'id'>) => {
+    toastSeq.current += 1;
+    setToast({ ...t, id: toastSeq.current });
+  }, []);
+  const hideToast = useCallback((id: number) => {
+    setToast((t) => (t && t.id === id ? null : t));
+  }, []);
 
-  const originX = useSharedValue(0);
-  const originY = useSharedValue(0);
-  const ghostW = useSharedValue(0);
-  const ghostH = useSharedValue(0);
-  const ghostProgress = useSharedValue(1); // 0 → 1 = fold away
-  const planeOpacity = useSharedValue(0);
-  const planeScale = useSharedValue(0.4);
-  const flyProgress = useSharedValue(0);
-  const trailOpacity = useSharedValue(0);
-  const composerPop = useSharedValue(1);
+  // ── Paper → plane → rocket animation (UI thread) ───────────────────────
+  // dragY: note follows the finger; fold: corners fold in + paper narrows;
+  // planeIn: the folded plane appears; lift: rocket launch; appear: the
+  // fresh note fading back in.
+  const dragY = useSharedValue(0);
+  const fold = useSharedValue(0);
+  const planeIn = useSharedValue(0);
+  const lift = useSharedValue(0);
+  const appear = useSharedValue(1);
   const shakeX = useSharedValue(0);
-
-  const ghostStyle = useAnimatedStyle(() => {
-    const p = ghostProgress.value;
-    return {
-      opacity: 1 - p,
-      width: ghostW.value,
-      height: ghostH.value,
-      transform: [
-        { translateX: originX.value - ghostW.value / 2 },
-        { translateY: originY.value - ghostH.value / 2 - p * 30 },
-        { scale: 1 - p * 0.78 },
-        { rotate: `${-14 * p}deg` },
-      ],
-    };
-  });
-
-  const planeStyle = useAnimatedStyle(() => {
-    const t = flyProgress.value;
-    const pos = planePath(t);
-    const dt = 0.005;
-    const a = planePath(t - dt < 0 ? 0 : t - dt);
-    const b = planePath(t + dt > 1 ? 1 : t + dt);
-    const tangentDeg = (Math.atan2(b.y - a.y, b.x - a.x) * 180) / Math.PI;
-    return {
-      opacity: planeOpacity.value,
-      transform: [
-        { translateX: originX.value - PLANE_SIZE / 2 + pos.x },
-        { translateY: originY.value - PLANE_SIZE / 2 + pos.y },
-        { scale: planeScale.value },
-        { rotate: `${tangentDeg + PLANE_ICON_ROTATION_OFFSET}deg` },
-      ],
-    };
-  });
-
-  const trailAnchorStyle = useAnimatedStyle(() => ({
-    opacity: trailOpacity.value,
-    transform: [{ translateX: originX.value }, { translateY: originY.value }],
-  }));
-
-  const composerAnimStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: shakeX.value }, { scale: composerPop.value }],
-  }));
-
-  const runFlight = useCallback(
-    (cx: number, cy: number, w: number, h: number) => {
-      originX.value = cx;
-      originY.value = cy;
-      ghostW.value = w;
-      ghostH.value = h;
-
-      // 1. The note folds up (0–420ms).
-      ghostProgress.value = 0;
-      ghostProgress.value = withTiming(1, {
-        duration: 420,
-        easing: Easing.in(Easing.cubic),
-      });
-
-      // 2. A fresh sheet pops into the composer.
-      composerPop.value = 0.94;
-      composerPop.value = withDelay(180, withSpring(1, { damping: 12, stiffness: 180 }));
-
-      // 3. Plane appears where the note was and takes off along the path.
-      flyProgress.value = 0;
-      flyProgress.value = withDelay(
-        300,
-        withTiming(1, { duration: 1250, easing: Easing.in(Easing.quad) }),
-      );
-      planeOpacity.value = 0;
-      planeOpacity.value = withDelay(
-        200,
-        withSequence(
-          withTiming(1, { duration: 180 }),
-          withDelay(1000, withTiming(0, { duration: 300 })),
-        ),
-      );
-      planeScale.value = 0.4;
-      planeScale.value = withDelay(
-        200,
-        withSequence(
-          withSpring(1.05, { damping: 9, stiffness: 220 }),
-          withTiming(0.35, { duration: 1150 }),
-        ),
-      );
-      trailOpacity.value = 1;
-      trailOpacity.value = withDelay(1400, withTiming(0, { duration: 400 }));
-    },
-    [
-      originX,
-      originY,
-      ghostW,
-      ghostH,
-      ghostProgress,
-      composerPop,
-      flyProgress,
-      planeOpacity,
-      planeScale,
-      trailOpacity,
-    ],
-  );
-
-  const startFlight = useCallback(
-    (text: string) => {
-      setFlyingText(text);
-      const root = rootRef.current;
-      const comp = composerRef.current;
-      const fallback = () => runFlight(180, 300, 300, 200);
-      if (!root || !comp) {
-        fallback();
-        return;
-      }
-      comp.measureLayout(
-        root,
-        (x, y, w, h) => runFlight(x + w / 2, y + h / 2, w, h),
-        fallback,
-      );
-      // Second, softer tap as the plane leaves the hand.
-      setTimeout(() => {
-        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      }, 320);
-    },
-    [runFlight],
-  );
 
   const shake = useCallback(() => {
     void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
@@ -356,22 +284,62 @@ export default function SendScreen() {
     );
   }, [shakeX]);
 
-  // ── Launch ─────────────────────────────────────────────────────────────
-  const showToast = useCallback((t: Omit<ToastState, 'id'>) => {
-    toastSeq.current += 1;
-    setToast({ ...t, id: toastSeq.current });
-  }, []);
-  const hideToast = useCallback((id: number) => {
-    setToast((t) => (t && t.id === id ? null : t));
-  }, []);
+  const springBack = useCallback(() => {
+    dragY.value = withSpring(0, { damping: 14, stiffness: 180 });
+  }, [dragY]);
 
-  const handleLaunch = useCallback(() => {
+  const resetNote = useCallback(() => {
+    lift.value = 0;
+    fold.value = 0;
+    planeIn.value = 0;
+    dragY.value = 0;
+    appear.value = 0;
+    appear.value = withTiming(1, { duration: 350 });
+    setPhase('idle');
+  }, [lift, fold, planeIn, dragY, appear]);
+
+  /** Fires the request and the rocket at the same moment. */
+  const takeOff = useCallback(() => {
     const text = message.trim();
-    if (!text) {
+    const l = launch(text, toApiFilters(filters));
+    if (!l) {
+      resetNote();
+      return;
+    }
+    setPhase('flying');
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+    lift.value = withTiming(
+      1,
+      { duration: LAUNCH_MS, easing: Easing.in(Easing.cubic) },
+      (finished) => {
+        if (finished) runOnJS(resetNote)();
+      },
+    );
+    const flight: SentInfo = { key: l.tempId, id: l.tempId };
+    later(() => setSent(flight), LAUNCH_MS + 150);
+
+    void l.result.then((res) => {
+      if (res.ok) {
+        setSent((cur) => (cur && cur.key === l.tempId ? { ...cur, id: res.plane.id } : cur));
+        return;
+      }
+      setSent((cur) => (cur && cur.key === l.tempId ? null : cur));
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      toastSeq.current += 1;
+      setToast(toastForFailure(res, toastSeq.current));
+      if (res.code === 'NO_PLANES') void refreshBalance();
+    });
+  }, [message, launch, filters, lift, resetNote, later, refreshBalance]);
+
+  /** Swipe released past the threshold: fold the paper into a plane. */
+  const onSwipeSend = useCallback(() => {
+    if (!message.trim()) {
+      springBack();
       shake();
       return;
     }
     if (count <= 0) {
+      springBack();
       showToast({
         icon: 'paper-plane-outline',
         title: "You're out of planes",
@@ -380,31 +348,121 @@ export default function SendScreen() {
       });
       return;
     }
-    const l = launch(text, toApiFilters(filters));
-    if (!l) return; // same note already in flight (double tap)
-
-    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     Keyboard.dismiss();
-    startFlight(text);
-    setMessage('');
-    setLast({ key: l.tempId, id: l.tempId });
+    setPhase('folded');
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    dragY.value = withSpring(-HOVER_LIFT, { damping: 16, stiffness: 160 });
+    fold.value = withTiming(1, { duration: FOLD_MS, easing: Easing.inOut(Easing.cubic) });
+    planeIn.value = withDelay(
+      FOLD_MS - 180,
+      withSpring(1, { damping: 11, stiffness: 160 }),
+    );
+    later(() => void Haptics.selectionAsync(), FOLD_MS - 120);
+    // Short window to change your mind, then it takes off on its own.
+    later(takeOff, FOLD_MS + UNDO_MS);
+  }, [message, count, springBack, shake, showToast, dragY, fold, planeIn, later, takeOff]);
 
-    void l.result.then((res) => {
-      if (res.ok) {
-        setLast((cur) =>
-          cur && cur.key === l.tempId ? { key: cur.key, id: res.plane.id } : cur,
-        );
-        return;
-      }
-      setLast((cur) => (cur && cur.key === l.tempId ? null : cur));
-      // Restore the note unless the user already started a new one.
-      setMessage((cur) => (cur.trim() ? cur : text));
-      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      toastSeq.current += 1;
-      setToast(toastForFailure(res, toastSeq.current));
-      if (res.code === 'NO_PLANES') void refreshBalance();
+  /** Cancel during the hover: unfold back into the note, nothing is sent. */
+  const cancelLaunch = useCallback(() => {
+    clearTimers();
+    void Haptics.selectionAsync();
+    planeIn.value = withTiming(0, { duration: 180 });
+    fold.value = withDelay(80, withTiming(0, { duration: 380, easing: Easing.out(Easing.cubic) }));
+    dragY.value = withSpring(0, { damping: 15, stiffness: 170 });
+    setPhase('idle');
+  }, [clearTimers, planeIn, fold, dragY]);
+
+  // Swipe-up gesture on the note (PanResponder: vertical, upward only).
+  const handlersRef = useRef({ onSwipeSend, springBack });
+  useEffect(() => {
+    handlersRef.current = { onSwipeSend, springBack };
+  }, [onSwipeSend, springBack]);
+  const phaseRef = useRef<Phase>('idle');
+  useEffect(() => {
+    phaseRef.current = phase;
+  }, [phase]);
+
+  // Capture phase: claim a clearly-upward drag before the TextInput inside
+  // the note can keep it; taps still reach the TextInput for typing.
+  const isSwipeUp = (g: { dx: number; dy: number }) =>
+    phaseRef.current === 'idle' && g.dy < -10 && Math.abs(g.dy) > Math.abs(g.dx) * 1.5;
+  const [notePan] = useState(() =>
+    PanResponder.create({
+      onMoveShouldSetPanResponderCapture: (_e, g) => isSwipeUp(g),
+      onMoveShouldSetPanResponder: (_e, g) => isSwipeUp(g),
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderMove: (_e, g) => {
+        // Rubber-band: follows the finger, resists the further it goes.
+        const up = Math.min(0, g.dy);
+        dragY.value = up > -SWIPE_SEND_PX ? up : -SWIPE_SEND_PX + (up + SWIPE_SEND_PX) * 0.35;
+      },
+      onPanResponderRelease: (_e, g) => {
+        if (g.dy < -SWIPE_SEND_PX || g.vy < -SWIPE_SEND_VELOCITY) {
+          handlersRef.current.onSwipeSend();
+        } else {
+          handlersRef.current.springBack();
+        }
+      },
+      onPanResponderTerminate: () => handlersRef.current.springBack(),
+    }),
+  );
+
+  // Keyboard: Android edge-to-edge doesn't resize the window, so lift the
+  // content by however much of the keyboard overlaps this screen.
+  const keyboard = useAnimatedKeyboard({
+    isStatusBarTranslucentAndroid: true,
+    isNavigationBarTranslucentAndroid: true,
+  });
+  const bodyRef = useRef<View>(null);
+  const bodyBottomGap = useSharedValue(0);
+  const measureBody = useCallback(() => {
+    bodyRef.current?.measureInWindow((_x, y, _w, h) => {
+      bodyBottomGap.value = Math.max(0, windowHeight - (y + h));
     });
-  }, [message, count, launch, filters, startFlight, shake, showToast, refreshBalance]);
+  }, [bodyBottomGap, windowHeight]);
+  const keyboardStyle = useAnimatedStyle(() => ({
+    paddingBottom: Math.max(0, keyboard.height.value - bodyBottomGap.value),
+  }));
+
+  // While a finger is on the note, tab swiping is paused so an upward
+  // swipe can't be mistaken for a tab change.
+  const navigation = useNavigation();
+  const lockTabSwipe = useCallback(
+    (locked: boolean) => navigation.setOptions({ swipeEnabled: !locked }),
+    [navigation],
+  );
+
+  const launchDistance = windowHeight;
+  const noteStyle = useAnimatedStyle(() => ({
+    opacity: appear.value,
+    transform: [
+      { translateX: shakeX.value },
+      { translateY: dragY.value - lift.value * launchDistance },
+      { scale: (1 - fold.value * 0.15) * (0.96 + appear.value * 0.04) },
+    ],
+  }));
+  const paperStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(fold.value, [0, 0.75, 0.95], [1, 1, 0], Extrapolation.CLAMP),
+    transform: [
+      { scaleX: 1 - fold.value * 0.55 },
+      { scaleY: 1 - fold.value * 0.3 },
+    ],
+  }));
+  const cornerStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(fold.value, [0, 0.15], [0, 1], Extrapolation.CLAMP),
+    transform: [{ scale: interpolate(fold.value, [0, 0.7], [0, 1], Extrapolation.CLAMP) }],
+  }));
+  const planeStyle = useAnimatedStyle(() => ({
+    opacity: planeIn.value,
+    transform: [
+      { scale: 0.4 + planeIn.value * 0.6 - lift.value * 0.35 },
+      { rotate: `${-45 + lift.value * 6}deg` },
+    ],
+  }));
+  const trailStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(lift.value, [0, 0.1, 0.8, 1], [0, 0.9, 0.6, 0]),
+    height: 20 + lift.value * 220,
+  }));
 
   const handleGetPlanes = useCallback(() => {
     Alert.alert(
@@ -413,102 +471,163 @@ export default function SendScreen() {
     );
   }, []);
 
-  const lastPlane = last ? sentPlanes.find((p) => p.id === last.id) : undefined;
-  const openLastPlane = useCallback(() => {
-    if (!lastPlane || lastPlane.optimistic) return;
-    router.push({
-      pathname: '/plane/[id]',
-      params: { id: lastPlane.id, readOnly: '1' },
-    });
-  }, [lastPlane, router]);
-  const openAllPlanes = useCallback(() => router.push('/planes'), [router]);
-
+  const sentPlane = sent ? sentPlanes.find((p) => p.id === sent.id) : undefined;
+  const openAllPlanes = useCallback(() => {
+    setSent(null);
+    router.push('/planes');
+  }, [router]);
+  const closeSent = useCallback(() => setSent(null), []);
+  const clearNote = useCallback(() => {
+    void Haptics.selectionAsync();
+    setMessage('');
+  }, []);
+  const filtersActive = !isDefaultFilters(filters);
   const outOfPlanes = count <= 0;
 
   return (
     <SafeAreaView edges={['top']} style={[styles.root, { backgroundColor: c.background }]}>
-      <View ref={rootRef} collapsable={false} style={styles.flex}>
-      <TabSwipeRegion currentRoute="/send">
-        <Animated.View style={fadeStyle}>
-          <TabNavHeader route="/send">
-            <ThemedText style={styles.title}>Send a plane</ThemedText>
-            <PlaneBalance />
-          </TabNavHeader>
-        </Animated.View>
-      </TabSwipeRegion>
+      <TabNavHeader route="/send">
+        <IconButton
+          icon="options-outline"
+          label="Who can catch it"
+          active={filtersActive}
+          onPress={openFilters}
+          c={c}
+        />
+        <PlaneBalance />
+      </TabNavHeader>
 
-      <TabSwipeRegion currentRoute="/send" style={styles.flex}>
-        <Animated.View style={[styles.flex, fadeStyle]}>
-          <ScrollView
-            contentContainerStyle={styles.scroll}
-            keyboardShouldPersistTaps="handled"
-            keyboardDismissMode="interactive"
-            automaticallyAdjustKeyboardInsets={Platform.OS === 'ios'}
-            showsVerticalScrollIndicator={false}
+      <Animated.View
+        ref={bodyRef}
+        onLayout={measureBody}
+        style={[styles.body, keyboardStyle]}
+      >
+      <Pressable style={styles.flex} onPress={Keyboard.dismiss} accessible={false}>
+        <Pressable
+          onPress={openFilters}
+          hitSlop={8}
+          style={({ pressed }) => [styles.toChip, { opacity: pressed ? 0.6 : 1 }]}
+          accessibilityRole="button"
+          accessibilityLabel="Change who can catch this plane"
+        >
+          <ThemedText style={[styles.toLabel, { color: c.textMuted }]}>To</ThemedText>
+          <ThemedText style={[styles.toValue, { color: c.text }]} numberOfLines={1}>
+            {summarizeFilters(filters)}
+          </ThemedText>
+          <Ionicons name="chevron-down" size={14} color={c.textSubtle} />
+        </Pressable>
+
+        <View style={styles.stage}>
+          {/* Rocket trail under the plane while it climbs. */}
+          <Animated.View style={[styles.trail, { backgroundColor: c.tint }, trailStyle]} />
+          <Animated.View
+            style={[styles.noteWrap, noteStyle]}
+            onTouchStart={() => lockTabSwipe(true)}
+            onTouchEnd={() => lockTabSwipe(false)}
+            onTouchCancel={() => lockTabSwipe(false)}
+            {...notePan.panHandlers}
           >
-            <View ref={composerRef} collapsable={false}>
-              <Animated.View style={composerAnimStyle}>
-                <Composer value={message} onChange={setMessage} c={c} />
-              </Animated.View>
-            </View>
+            <Animated.View
+              style={[
+                styles.note,
+                { backgroundColor: paper.bg, borderColor: paper.border, shadowColor: paper.shadow },
+                paperStyle,
+              ]}
+            >
+              <TextInput
+                value={message}
+                onChangeText={setMessage}
+                editable={phase === 'idle'}
+                placeholder="Tell a stranger something kind, weird, or true…"
+                placeholderTextColor={c.textSubtle}
+                multiline
+                scrollEnabled={false}
+                maxLength={MAX_LENGTH}
+                textAlignVertical="top"
+                style={[styles.noteInput, { color: c.text }]}
+                accessibilityLabel="Your note"
+              />
+              <View style={styles.noteFooter}>
+                {message.length > 0 && phase === 'idle' ? (
+                  <Pressable onPress={clearNote} hitSlop={10} accessibilityRole="button">
+                    <ThemedText style={[styles.clear, { color: c.textMuted }]}>Clear</ThemedText>
+                  </Pressable>
+                ) : (
+                  <View />
+                )}
+                <ThemedText style={[styles.counter, { color: c.textSubtle }]}>
+                  {message.length}/{MAX_LENGTH}
+                </ThemedText>
+              </View>
+              {/* Folding corners (the first two folds of a paper plane). */}
+              <Animated.View
+                pointerEvents="none"
+                style={[styles.cornerLeft, { borderTopColor: paper.fold }, cornerStyle]}
+              />
+              <Animated.View
+                pointerEvents="none"
+                style={[styles.cornerRight, { borderTopColor: paper.fold }, cornerStyle]}
+              />
+            </Animated.View>
+            <Animated.View pointerEvents="none" style={[styles.foldedPlane, planeStyle]}>
+              <Ionicons name="paper-plane" size={96} color={c.tint} />
+            </Animated.View>
+          </Animated.View>
+        </View>
 
-            <FiltersCard
-              filters={filters}
-              onGender={setGender}
-              onAge={setAge}
-              onDistance={setDistance}
-              onOpenCountry={openCountry}
-              onReset={resetFilters}
-              c={c}
-            />
-
-            {outOfPlanes ? (
+        {/* Always-visible action area right under the note. */}
+        <View style={styles.actionArea}>
+          {phase === 'folded' ? (
+            <Animated.View entering={FadeIn.duration(200)} style={styles.cancelWrap}>
+              <Pressable
+                onPress={cancelLaunch}
+                hitSlop={10}
+                style={({ pressed }) => [
+                  styles.cancelCircle,
+                  { backgroundColor: c.surfaceAlt, borderColor: c.borderStrong, opacity: pressed ? 0.7 : 1 },
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="Cancel sending"
+              >
+                <Ionicons name="close" size={26} color={c.text} />
+              </Pressable>
+              <ThemedText style={[styles.cancelLabel, { color: c.text }]}>Cancel</ThemedText>
+              <ThemedText style={[styles.launching, { color: c.textMuted }]}>
+                Taking off in a moment…
+              </ThemedText>
+            </Animated.View>
+          ) : phase === 'idle' ? (
+            outOfPlanes ? (
               <OutOfPlanesCard onGetPlanes={handleGetPlanes} c={c} />
             ) : (
-              <LaunchButton
-                enabled={message.trim().length > 0}
-                onPress={handleLaunch}
-                c={c}
-              />
-            )}
-
-            {lastPlane ? (
-              <LastPlaneStatus
-                key={last?.key}
-                plane={lastPlane}
-                onOpen={openLastPlane}
-                onSeeAll={openAllPlanes}
-                c={c}
-              />
-            ) : null}
-          </ScrollView>
-        </Animated.View>
-      </TabSwipeRegion>
-
-      {/* Flight overlay — sits above everything, never takes touches. */}
-      <View style={styles.overlay}>
-        <Animated.View
-          style={[
-            styles.ghost,
-            { backgroundColor: c.surface, borderColor: c.border },
-            ghostStyle,
-          ]}
-        >
-          <ThemedText style={[styles.ghostText, { color: c.text }]} numberOfLines={5}>
-            {flyingText}
-          </ThemedText>
-        </Animated.View>
-        <Animated.View style={[styles.trailAnchor, trailAnchorStyle]}>
-          <PlaneTrail progress={flyProgress} color={c.tint} />
-        </Animated.View>
-        <Animated.View style={[styles.plane, planeStyle]}>
-          <Ionicons name="paper-plane" size={PLANE_SIZE - 8} color={c.tint} />
-        </Animated.View>
-      </View>
+              <SwipeHint color={c.tint} text={c.text} onPress={onSwipeSend} />
+            )
+          ) : null}
+        </View>
+      </Pressable>
+      </Animated.View>
 
       {toast ? <SendToast key={toast.id} toast={toast} onHide={hideToast} c={c} /> : null}
 
-      </View>
+      <SentModal
+        visible={sent !== null}
+        plane={sentPlane}
+        onClose={closeSent}
+        onSeeAll={openAllPlanes}
+        c={c}
+      />
+
+      <FiltersSheet visible={filtersOpen} onClose={closeFilters} c={c}>
+        <FiltersCard
+          filters={filters}
+          onGender={setGender}
+          onAge={setAge}
+          onDistance={setDistance}
+          onOpenCountry={openCountry}
+          onReset={resetFilters}
+          c={c}
+        />
+      </FiltersSheet>
 
       <CountrySheet
         visible={countryOpen}
@@ -520,94 +639,77 @@ export default function SendScreen() {
   );
 }
 
-// ── Composer ────────────────────────────────────────────────────────────────
+// ── Swipe hint ──────────────────────────────────────────────────────────────
 
-const Composer = memo(function Composer({
-  value,
-  onChange,
+function SwipeHint({
+  color,
+  text,
+  onPress,
+}: {
+  color: string;
+  text: string;
+  onPress: () => void;
+}) {
+  const bounce = useSharedValue(0);
+  useEffect(() => {
+    bounce.value = withRepeat(
+      withSequence(
+        withTiming(-10, { duration: 600, easing: Easing.out(Easing.quad) }),
+        withTiming(0, { duration: 600, easing: Easing.in(Easing.quad) }),
+      ),
+      -1,
+      false,
+    );
+  }, [bounce]);
+  const style = useAnimatedStyle(() => ({ transform: [{ translateY: bounce.value }] }));
+  return (
+    <Pressable
+      onPress={onPress}
+      hitSlop={12}
+      style={styles.hint}
+      accessibilityRole="button"
+      accessibilityLabel="Send the note (or swipe it up)"
+    >
+      <Animated.View style={[styles.hintArrows, style]}>
+        <Ionicons name="chevron-up" size={26} color={color} />
+        <Ionicons name="chevron-up" size={26} color={color} style={styles.hintArrow2} />
+      </Animated.View>
+      <ThemedText style={[styles.hintText, { color: text }]}>Swipe up to send</ThemedText>
+    </Pressable>
+  );
+}
+
+function IconButton({
+  icon,
+  label,
+  active,
+  onPress,
   c,
 }: {
-  value: string;
-  onChange: (v: string) => void;
+  icon: keyof typeof Ionicons.glyphMap;
+  label: string;
+  active?: boolean;
+  onPress: () => void;
   c: Palette;
 }) {
-  const len = value.length;
-  const fill = useSharedValue(0);
-  useEffect(() => {
-    fill.value = withTiming(len / MAX_LENGTH, { duration: 160 });
-  }, [len, fill]);
-
-  const tint = c.tint;
-  const warning = c.warning;
-  const danger = c.danger;
-  const meterStyle = useAnimatedStyle(() => ({
-    width: `${Math.min(1, fill.value) * 100}%`,
-    backgroundColor: interpolateColor(
-      fill.value,
-      [0, 0.84, 0.85, 0.99, 1],
-      [tint, tint, warning, warning, danger],
-    ),
-  }));
-
-  const remaining = MAX_LENGTH - len;
-  const counterColor =
-    remaining <= 0 ? c.danger : remaining <= 30 ? c.warning : c.textSubtle;
-
   return (
-    <View style={[styles.paper, { backgroundColor: c.surface, borderColor: c.border }]}>
-      {/* Postcard header band */}
-      <View style={[styles.paperBand, { backgroundColor: c.tintMuted }]}>
-        <View style={[styles.stamp, { borderColor: c.tint }]}>
-          <Ionicons name="paper-plane" size={14} color={c.tint} />
-        </View>
-        <View style={styles.flex}>
-          <ThemedText style={[styles.bandTitle, { color: c.tintPressed }]}>
-            To: someone new
-          </ThemedText>
-          <ThemedText style={[styles.bandSub, { color: c.textMuted }]}>
-            One person catches it. If they pass, it flies on.
-          </ThemedText>
-        </View>
-      </View>
-
-      <View style={styles.writing}>
-        {/* Ruled lines behind the text */}
-        <View style={styles.lines}>
-          {Array.from({ length: 5 }).map((_, i) => (
-            <View
-              key={i}
-              style={[styles.rule, { top: (i + 1) * LINE_HEIGHT, backgroundColor: c.border }]}
-            />
-          ))}
-        </View>
-        <TextInput
-          value={value}
-          onChangeText={onChange}
-          placeholder="Write something kind, weird, or true…"
-          placeholderTextColor={c.textSubtle}
-          multiline
-          maxLength={MAX_LENGTH}
-          textAlignVertical="top"
-          scrollEnabled={false}
-          style={[styles.input, { color: c.text }]}
-        />
-      </View>
-
-      <View style={styles.meterRow}>
-        <View style={[styles.meterTrack, { backgroundColor: c.surfaceAlt }]}>
-          <Animated.View style={[styles.meterFill, meterStyle]} />
-        </View>
-        <ThemedText style={[styles.counter, { color: counterColor }]}>
-          {len}/{MAX_LENGTH}
-        </ThemedText>
-      </View>
-
-      <View
-        style={[styles.foldCorner, { borderColor: c.border, backgroundColor: c.surfaceAlt }]}
-      />
-    </View>
+    <Pressable
+      onPress={onPress}
+      hitSlop={8}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      style={({ pressed }) => [
+        styles.iconBtn,
+        { backgroundColor: active ? c.tintMuted : c.surfaceAlt, opacity: pressed ? 0.7 : 1 },
+      ]}
+    >
+      <Ionicons name={icon} size={18} color={active ? c.tint : c.text} />
+      {active ? (
+        <View style={[styles.filterDot, { backgroundColor: c.tint, borderColor: c.background }]} />
+      ) : null}
+    </Pressable>
   );
-});
+}
 
 // ── Filters ─────────────────────────────────────────────────────────────────
 
@@ -696,66 +798,12 @@ const FiltersCard = memo(function FiltersCard({
             ]}
             numberOfLines={1}
           >
-            {filters.country ?? 'Anywhere'}
+            {filters.country ? withFlag(filters.country) : 'Anywhere'}
           </ThemedText>
           <Ionicons name="chevron-down" size={16} color={c.textSubtle} />
         </Pressable>
       </View>
     </View>
-  );
-});
-
-// ── Launch button ───────────────────────────────────────────────────────────
-
-const LaunchButton = memo(function LaunchButton({
-  enabled,
-  onPress,
-  c,
-}: {
-  enabled: boolean;
-  onPress: () => void;
-  c: Palette;
-}) {
-  const press = useSharedValue(1);
-  const on = useSharedValue(enabled ? 1 : 0);
-  useEffect(() => {
-    on.value = withTiming(enabled ? 1 : 0, { duration: 200 });
-  }, [enabled, on]);
-
-  const idle = c.borderStrong;
-  const active = c.tint;
-  const style = useAnimatedStyle(() => ({
-    backgroundColor: interpolateColor(on.value, [0, 1], [idle, active]),
-    shadowOpacity: 0.25 * on.value,
-    transform: [{ scale: press.value }],
-  }));
-  const iconStyle = useAnimatedStyle(() => ({
-    transform: [
-      { translateX: (1 - press.value) * 40 },
-      { translateY: -(1 - press.value) * 40 },
-      { rotate: `${(1 - press.value) * -60}deg` },
-    ],
-  }));
-
-  return (
-    <Pressable
-      onPress={onPress}
-      onPressIn={() => {
-        press.value = withSpring(0.95, { damping: 15, stiffness: 400 });
-      }}
-      onPressOut={() => {
-        press.value = withSpring(1, { damping: 10, stiffness: 260 });
-      }}
-      accessibilityRole="button"
-      accessibilityLabel="Launch plane"
-    >
-      <Animated.View style={[styles.launch, { shadowColor: c.tint }, style]}>
-        <ThemedText style={styles.launchLabel}>Launch plane</ThemedText>
-        <Animated.View style={iconStyle}>
-          <Ionicons name="paper-plane" size={20} color="#fff" />
-        </Animated.View>
-      </Animated.View>
-    </Pressable>
   );
 });
 
@@ -785,50 +833,147 @@ function OutOfPlanesCard({ onGetPlanes, c }: { onGetPlanes: () => void; c: Palet
   );
 }
 
-// ── Live status of the last plane ───────────────────────────────────────────
+// ── "Plane sent" confirmation ──────────────────────────────────────────────
 
-function LastPlaneStatus({
+function SentModal({
+  visible,
   plane,
-  onOpen,
+  onClose,
   onSeeAll,
   c,
 }: {
-  plane: LiveSentPlane;
-  onOpen: () => void;
+  visible: boolean;
+  plane?: LiveSentPlane;
+  onClose: () => void;
   onSeeAll: () => void;
   c: Palette;
 }) {
-  const meta = planeStatusMeta(plane, c);
-  const passed = passedOnLabel(plane);
+  const recipient = plane?.recipient;
+  const location = recipient?.location ? locationWithFlag(recipient.location) : null;
+
   return (
-    <Animated.View entering={FadeInDown.springify().damping(16)} exiting={FadeOut}>
-      <Pressable
-        onPress={onOpen}
-        disabled={plane.optimistic}
-        style={({ pressed }) => [
-          styles.status,
-          { backgroundColor: c.surface, borderColor: c.border, opacity: pressed ? 0.85 : 1 },
-        ]}
-      >
-        <View style={[styles.statusIcon, { backgroundColor: meta.tint + '1F' }]}>
-          <Ionicons name={meta.icon} size={16} color={meta.tint} />
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
+      <View style={styles.modalRoot}>
+        <Pressable style={styles.modalBackdrop} onPress={onClose} accessibilityLabel="Close" />
+        <Animated.View
+          entering={FadeInDown.springify().damping(16)}
+          style={[styles.modalCard, { backgroundColor: c.background }]}
+        >
+          <Pressable
+            onPress={onClose}
+            hitSlop={12}
+            style={[styles.modalClose, { backgroundColor: c.surfaceAlt }]}
+            accessibilityRole="button"
+            accessibilityLabel="Close"
+          >
+            <Ionicons name="close" size={18} color={c.text} />
+          </Pressable>
+
+          {recipient ? (
+            <>
+              <Avatar uri={recipient.avatarUrl} name={recipient.name} size={76} />
+              <ThemedText style={[styles.modalKicker, { color: c.textMuted }]}>
+                Your plane landed with
+              </ThemedText>
+              <ThemedText style={styles.modalName} numberOfLines={1}>
+                {recipient.name}
+              </ThemedText>
+              <View style={styles.modalFacts}>
+                <View style={[styles.modalFact, { backgroundColor: c.surfaceAlt }]}>
+                  <Ionicons name="calendar-outline" size={14} color={c.textMuted} />
+                  <ThemedText style={[styles.modalFactText, { color: c.text }]}>
+                    {recipient.age != null ? `${recipient.age} yrs` : 'Age hidden'}
+                  </ThemedText>
+                </View>
+                <View style={[styles.modalFact, { backgroundColor: c.surfaceAlt }]}>
+                  <Ionicons name="location-outline" size={14} color={c.textMuted} />
+                  <ThemedText style={[styles.modalFactText, { color: c.text }]} numberOfLines={1}>
+                    {location ?? 'Somewhere'}
+                  </ThemedText>
+                </View>
+              </View>
+            </>
+          ) : (
+            <>
+              <View style={[styles.modalPlane, { backgroundColor: c.tintMuted }]}>
+                <Ionicons name="paper-plane" size={34} color={c.tint} />
+              </View>
+              <View style={styles.modalSearching}>
+                <ThemedText style={styles.modalName}>Finding someone</ThemedText>
+                <FlyingDots color={c.tint} />
+              </View>
+              <ThemedText style={[styles.modalKicker, { color: c.textMuted }]}>
+                You&apos;ll see who caught it here and in your planes.
+              </ThemedText>
+            </>
+          )}
+
+          <Pressable
+            onPress={onSeeAll}
+            style={({ pressed }) => [
+              styles.modalPrimary,
+              { backgroundColor: c.tint, opacity: pressed ? 0.85 : 1 },
+            ]}
+            accessibilityRole="button"
+          >
+            <ThemedText style={styles.modalPrimaryLabel}>View all planes</ThemedText>
+          </Pressable>
+        </Animated.View>
+      </View>
+    </Modal>
+  );
+}
+
+/** "Mumbai, India" → "Mumbai, 🇮🇳 India" when the country is known. */
+function locationWithFlag(location: string): string {
+  const parts = location.split(',').map((p) => p.trim());
+  const last = parts[parts.length - 1];
+  const flag = countryFlag(last);
+  if (!flag) return location;
+  parts[parts.length - 1] = `${flag} ${last}`;
+  return parts.join(', ');
+}
+
+// ── Filters sheet ───────────────────────────────────────────────────────────
+
+function FiltersSheet({
+  visible,
+  onClose,
+  c,
+  children,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  c: Palette;
+  children: React.ReactNode;
+}) {
+  const insets = useSafeAreaInsets();
+  return (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <View style={styles.sheetRoot}>
+        <Pressable style={styles.sheetBackdrop} onPress={onClose} accessibilityLabel="Close filters" />
+        <View
+          style={[
+            styles.sheet,
+            { backgroundColor: c.background, paddingBottom: insets.bottom + Spacing.md },
+          ]}
+        >
+          <View style={[styles.sheetHandle, { backgroundColor: c.borderStrong }]} />
+          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.sheetContent}>
+            {children}
+          </ScrollView>
+          <Pressable
+            onPress={onClose}
+            style={({ pressed }) => [
+              styles.sheetDone,
+              { backgroundColor: c.tint, opacity: pressed ? 0.85 : 1 },
+            ]}
+          >
+            <ThemedText style={styles.sheetDoneLabel}>Done</ThemedText>
+          </Pressable>
         </View>
-        <View style={styles.flex}>
-          <View style={styles.statusTitleRow}>
-            <ThemedText style={[styles.statusTitle, { color: meta.tint }]} numberOfLines={1}>
-              {meta.label}
-            </ThemedText>
-            {meta.animated ? <FlyingDots color={meta.tint} /> : null}
-          </View>
-          <ThemedText style={[styles.statusSub, { color: c.textMuted }]} numberOfLines={1}>
-            {passed ? `${passed} · ` : ''}“{plane.message}”
-          </ThemedText>
-        </View>
-        <Pressable onPress={onSeeAll} hitSlop={10}>
-          <ThemedText style={[styles.seeAll, { color: c.tint }]}>All</ThemedText>
-        </Pressable>
-      </Pressable>
-    </Animated.View>
+      </View>
+    </Modal>
   );
 }
 
@@ -889,120 +1034,34 @@ function SendToast({
 // ── Styles ──────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  root: { flex: 1 },
-  flex: { flex: 1 },
-  title: { fontSize: 22, fontWeight: '700' },
-  scroll: {
-    paddingHorizontal: Spacing.lg,
-    paddingTop: Spacing.sm,
-    paddingBottom: Spacing['3xl'],
-    gap: Spacing.lg,
-  },
-
-  // Composer
-  paper: {
-    borderRadius: Radii.xl,
-    borderWidth: StyleSheet.hairlineWidth,
-    overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOpacity: 0.08,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: 10 },
-    elevation: 4,
-  },
-  paperBand: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.md,
-    paddingHorizontal: Spacing.lg,
-    paddingVertical: Spacing.md,
-  },
-  stamp: {
-    width: 32,
-    height: 32,
-    borderRadius: 6,
-    borderWidth: 1.5,
-    borderStyle: 'dashed',
-    alignItems: 'center',
-    justifyContent: 'center',
-    transform: [{ rotate: '-6deg' }],
-  },
-  bandTitle: { fontSize: 14, fontWeight: '700' },
-  bandSub: { fontSize: 11, marginTop: 1 },
-  writing: {
-    minHeight: LINE_HEIGHT * 5 + Spacing.md,
-    paddingHorizontal: Spacing.lg,
-    paddingTop: Spacing.sm,
-  },
-  lines: {
-    ...StyleSheet.absoluteFillObject,
-    top: Spacing.sm + 2,
-    left: Spacing.lg,
-    right: Spacing.lg,
-    pointerEvents: 'none',
-  },
-  rule: {
+  actionArea: { height: 132, alignItems: 'center', justifyContent: 'center', paddingTop: Spacing.md },
+  body: { flex: 1, paddingHorizontal: Spacing.xl, paddingBottom: Spacing.lg },
+  cancelCircle: { width: 56, height: 56, borderRadius: 28, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
+  cancelLabel: { fontSize: 15, fontWeight: '700', marginTop: 2 },
+  cancelWrap: { alignItems: 'center', gap: 4 },
+  clear: { fontSize: 13, fontWeight: '600' },
+  cornerLeft: {
     position: 'absolute',
+    top: 0,
     left: 0,
-    right: 0,
-    height: StyleSheet.hairlineWidth,
-    opacity: 0.8,
+    width: 0,
+    height: 0,
+    borderTopWidth: 140,
+    borderRightWidth: 140,
+    borderRightColor: 'transparent',
   },
-  input: {
-    fontSize: 17,
-    lineHeight: LINE_HEIGHT,
-    minHeight: LINE_HEIGHT * 5,
-    padding: 0,
-    margin: 0,
-    paddingTop: 4,
-  },
-  meterRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.md,
-    paddingHorizontal: Spacing.lg,
-    paddingTop: Spacing.sm,
-    paddingBottom: Spacing.lg,
-    paddingRight: 44,
-  },
-  meterTrack: {
-    flex: 1,
-    height: 4,
-    borderRadius: 2,
-    overflow: 'hidden',
-  },
-  meterFill: { height: 4, borderRadius: 2 },
-  counter: { fontSize: 12, fontWeight: '600', fontVariant: ['tabular-nums'] },
-  foldCorner: {
+  cornerRight: {
     position: 'absolute',
-    bottom: 0,
+    top: 0,
     right: 0,
-    width: 28,
-    height: 28,
-    borderTopLeftRadius: Radii.md,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderLeftWidth: StyleSheet.hairlineWidth,
+    width: 0,
+    height: 0,
+    borderTopWidth: 140,
+    borderLeftWidth: 140,
+    borderLeftColor: 'transparent',
   },
-
-  // Filters
-  filtersCard: {
-    borderRadius: Radii.xl,
-    borderWidth: StyleSheet.hairlineWidth,
-    padding: Spacing.lg,
-    gap: Spacing.lg,
-  },
-  filtersHeader: { flexDirection: 'row', alignItems: 'center', gap: Spacing.md },
-  filtersTitle: { fontSize: 17, fontWeight: '700' },
-  filtersSummary: { fontSize: 13, marginTop: 2 },
-  reset: { fontSize: 13, fontWeight: '700' },
+  counter: { fontSize: 12, fontWeight: '600', fontVariant: ['tabular-nums'] },
   countryBlock: { gap: Spacing.sm },
-  countryLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  countryLabel: {
-    fontSize: 12,
-    fontWeight: '700',
-    letterSpacing: 0.6,
-    textTransform: 'uppercase',
-  },
   countryBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1012,22 +1071,84 @@ const styles = StyleSheet.create({
     borderRadius: Radii.md,
     borderWidth: StyleSheet.hairlineWidth,
   },
+  countryLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+  },
+  countryLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   countryValue: { flex: 1, fontSize: 15, fontWeight: '600' },
-
-  // Launch
-  launch: {
-    flexDirection: 'row',
+  filterDot: {
+    position: 'absolute',
+    top: 4,
+    right: 4,
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+    borderWidth: 1.5,
+  },
+  filtersCard: {
+    borderRadius: Radii.xl,
+    borderWidth: StyleSheet.hairlineWidth,
+    padding: Spacing.lg,
+    gap: Spacing.lg,
+  },
+  filtersHeader: { flexDirection: 'row', alignItems: 'center', gap: Spacing.md },
+  filtersSummary: { fontSize: 13, marginTop: 2 },
+  filtersTitle: { fontSize: 17, fontWeight: '700' },
+  flex: { flex: 1 },
+  foldedPlane: { position: 'absolute', alignItems: 'center', justifyContent: 'center' },
+  hint: { alignItems: 'center', gap: Spacing.xs },
+  hintArrow2: { marginTop: -14, opacity: 0.5 },
+  hintArrows: { alignItems: 'center' },
+  hintText: { fontSize: 15, fontWeight: '700' },
+  iconBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: Spacing.sm,
-    paddingVertical: 17,
-    borderRadius: Radii.pill,
-    shadowRadius: 14,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 4,
   },
-  launchLabel: { color: '#fff', fontSize: 17, fontWeight: '700', letterSpacing: 0.3 },
-
+  launching: { fontSize: 12 },
+  modalBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.45)' },
+  modalCard: { width: '100%', maxWidth: 360, borderRadius: Radii.xl, paddingHorizontal: Spacing.xl, paddingTop: Spacing['2xl'], paddingBottom: Spacing.xl, alignItems: 'center', gap: Spacing.sm },
+  modalClose: { position: 'absolute', top: Spacing.md, right: Spacing.md, width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', zIndex: 1 },
+  modalFact: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: Spacing.md, paddingVertical: 8, borderRadius: Radii.pill, maxWidth: '100%' },
+  modalFactText: { fontSize: 14, fontWeight: '600', flexShrink: 1 },
+  modalFacts: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: Spacing.sm, marginTop: Spacing.xs },
+  modalKicker: { fontSize: 13, textAlign: 'center', marginTop: Spacing.xs },
+  modalName: { fontSize: 22, fontWeight: '800', textAlign: 'center' },
+  modalPlane: { width: 76, height: 76, borderRadius: 38, alignItems: 'center', justifyContent: 'center' },
+  modalPrimary: { alignSelf: 'stretch', height: 50, borderRadius: Radii.pill, alignItems: 'center', justifyContent: 'center', marginTop: Spacing.lg },
+  modalPrimaryLabel: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  modalRoot: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: Spacing.lg },
+  modalSearching: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: Spacing.xs },
+  note: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: Radii.lg,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: Spacing.xl,
+    paddingTop: Spacing.xl,
+    paddingBottom: Spacing.lg,
+    overflow: 'hidden',
+    shadowOpacity: 0.1,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 5,
+  },
+  noteFooter: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingTop: Spacing.sm },
+  noteInput: { flex: 1, fontSize: 18, lineHeight: 28, padding: 0, margin: 0 },
+  noteWrap: { flex: 1, maxHeight: 400, alignItems: 'center', justifyContent: 'center' },
+  outBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: Radii.pill,
+  },
+  outBtnLabel: { color: '#fff', fontSize: 13, fontWeight: '700' },
   outCard: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1043,74 +1164,38 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  outTitle: { fontSize: 15, fontWeight: '700' },
   outSub: { fontSize: 12, marginTop: 2, lineHeight: 16 },
-  outBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+  outTitle: { fontSize: 15, fontWeight: '700' },
+  reset: { fontSize: 13, fontWeight: '700' },
+  root: { flex: 1 },
+  sheet: {
+    maxHeight: '85%',
+    borderTopLeftRadius: Radii.xl,
+    borderTopRightRadius: Radii.xl,
+    paddingHorizontal: Spacing.lg,
+    paddingTop: Spacing.sm,
+  },
+  sheetBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.4)' },
+  sheetContent: { paddingBottom: Spacing.md },
+  sheetDone: {
+    height: 48,
     borderRadius: Radii.pill,
-  },
-  outBtnLabel: { color: '#fff', fontSize: 13, fontWeight: '700' },
-
-  // Live status
-  status: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.md,
-    padding: Spacing.md,
-    borderRadius: Radii.lg,
-    borderWidth: StyleSheet.hairlineWidth,
-  },
-  statusIcon: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  statusTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  statusTitle: { fontSize: 14, fontWeight: '700', flexShrink: 1 },
-  statusSub: { fontSize: 12, marginTop: 2 },
-  seeAll: { fontSize: 13, fontWeight: '700' },
-
-  // Flight overlay
-  overlay: { ...StyleSheet.absoluteFillObject, pointerEvents: 'none' },
-  ghost: {
-    position: 'absolute',
-    left: 0,
-    top: 0,
-    borderRadius: Radii.xl,
-    borderWidth: StyleSheet.hairlineWidth,
-    padding: Spacing.lg,
-    justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOpacity: 0.12,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 8 },
-    elevation: 6,
+  sheetDoneLabel: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  sheetHandle: {
+    alignSelf: 'center',
+    width: 40,
+    height: 4,
+    borderRadius: 2,
+    marginBottom: Spacing.md,
   },
-  ghostText: { fontSize: 17, lineHeight: LINE_HEIGHT, fontStyle: 'italic' },
-  trailAnchor: { position: 'absolute', left: 0, top: 0, width: 0, height: 0 },
-  plane: {
-    position: 'absolute',
-    left: 0,
-    top: 0,
-    width: PLANE_SIZE,
-    height: PLANE_SIZE,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-
-  // Toast
-  toastWrap: {
-    position: 'absolute',
-    top: Spacing.sm,
-    left: Spacing.lg,
-    right: Spacing.lg,
-  },
+  sheetRoot: { flex: 1, justifyContent: 'flex-end' },
+  stage: { flex: 1, minHeight: 140, alignItems: 'stretch', justifyContent: 'center' },
+  toChip: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingTop: Spacing.xs, paddingBottom: Spacing.lg, alignSelf: 'center', maxWidth: '100%' },
+  toLabel: { fontSize: 13, fontWeight: '600' },
+  toValue: { fontSize: 14, fontWeight: '600', flexShrink: 1 },
   toast: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1124,6 +1209,7 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 8 },
     elevation: 8,
   },
+  toastBody: { fontSize: 12, lineHeight: 16, marginTop: 2 },
   toastIcon: {
     width: 34,
     height: 34,
@@ -1132,5 +1218,11 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   toastTitle: { fontSize: 14, fontWeight: '700' },
-  toastBody: { fontSize: 12, lineHeight: 16, marginTop: 2 },
+  toastWrap: {
+    position: 'absolute',
+    top: Spacing.sm,
+    left: Spacing.lg,
+    right: Spacing.lg,
+  },
+  trail: { position: 'absolute', alignSelf: 'center', bottom: '50%', width: 4, borderRadius: 2 },
 });

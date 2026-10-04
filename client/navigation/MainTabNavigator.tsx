@@ -1,13 +1,18 @@
 import { Ionicons } from '@/lib/native/vector-icons';
-import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
-import type { BottomTabBarProps } from '@react-navigation/bottom-tabs';
-import React, { useEffect, useMemo } from 'react';
-import { Pressable, StyleSheet, useWindowDimensions, View } from 'react-native';
-import Animated, {
-  useAnimatedStyle,
-  useSharedValue,
-  withTiming,
-} from 'react-native-reanimated';
+import {
+  createMaterialTopTabNavigator,
+  type MaterialTopTabBarProps,
+  type MaterialTopTabNavigationOptions,
+} from '@react-navigation/material-top-tabs';
+import React, { useMemo } from 'react';
+import {
+  Animated,
+  Dimensions,
+  Pressable,
+  StyleSheet,
+  useWindowDimensions,
+  View,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import ChatsScreen from '@/screens/tabs/ChatsScreen';
@@ -18,10 +23,20 @@ import SendScreen from '@/screens/tabs/SendScreen';
 import { ThemedText } from '@/components/themed-text';
 import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { useChats } from '@/lib/chats-context';
+import { useChatsUnreadTotal } from '@/lib/chats-context';
 import type { MainTabParamList } from '@/navigation/types';
 
-const Tab = createBottomTabNavigator<MainTabParamList>();
+/**
+ * Bottom tabs backed by a native pager (material-top-tabs +
+ * react-native-pager-view) so swiping between tabs follows the finger and
+ * snaps natively — Instagram / WhatsApp style. The tab bar is our own and is
+ * driven by the pager's live `position`, so the indicator and icon/label
+ * cross-fades track the finger too.
+ *
+ * Nested horizontal scrollers (Home card carousel, Profile segment pager)
+ * keep their own touches natively; tab swipes start anywhere else.
+ */
+const Tab = createMaterialTopTabNavigator<MainTabParamList>();
 
 type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
 
@@ -39,11 +54,49 @@ const TAB_CONFIG: Record<
 const INDICATOR_WIDTH = 28;
 const INDICATOR_HEIGHT = 3;
 
+// Known up-front so the pager renders at full width on the first frame
+// instead of measuring first (avoids a one-frame layout jump).
+const INITIAL_LAYOUT = { width: Dimensions.get('window').width, height: 0 };
+
+const renderTabBar = (props: MaterialTopTabBarProps) => (
+  <CustomTabBar {...props} />
+);
+
+function TabLazyPlaceholder() {
+  const scheme = useColorScheme() ?? 'light';
+  return (
+    <View style={[styles.fill, { backgroundColor: Colors[scheme].background }]} />
+  );
+}
+
+const renderLazyPlaceholder = () => <TabLazyPlaceholder />;
+
 export function MainTabNavigator() {
+  const scheme = useColorScheme() ?? 'light';
+  const background = Colors[scheme].background;
+
+  const screenOptions = useMemo<MaterialTopTabNavigationOptions>(
+    () => ({
+      swipeEnabled: true,
+      animationEnabled: true,
+      // Mount a tab the first time it's needed; keep immediate neighbours
+      // pre-rendered so a swipe never reveals a blank page. Once mounted, a
+      // tab stays mounted (no re-mounts on swipe).
+      lazy: true,
+      lazyPreloadDistance: 1,
+      lazyPlaceholder: renderLazyPlaceholder,
+      sceneStyle: { backgroundColor: background },
+    }),
+    [background],
+  );
+
   return (
     <Tab.Navigator
-      tabBar={(props) => <CustomTabBar {...props} />}
-      screenOptions={{ headerShown: false }}
+      tabBarPosition="bottom"
+      tabBar={renderTabBar}
+      initialLayout={INITIAL_LAYOUT}
+      overScrollMode="never"
+      screenOptions={screenOptions}
     >
       <Tab.Screen name="Home" component={HomeScreen} />
       <Tab.Screen name="Chats" component={ChatsScreen} />
@@ -54,34 +107,27 @@ export function MainTabNavigator() {
   );
 }
 
-function CustomTabBar({ state, navigation }: BottomTabBarProps) {
+function CustomTabBar({ state, navigation, position }: MaterialTopTabBarProps) {
   const scheme = useColorScheme() ?? 'light';
   const c = Colors[scheme];
   const insets = useSafeAreaInsets();
   const { width: screenWidth } = useWindowDimensions();
-  const { chats } = useChats();
-  const chatsUnread = useMemo(
-    () =>
-      chats.reduce(
-        (sum, chat) => sum + (chat.isBlocked ? 0 : chat.unreadCount),
-        0,
-      ),
-    [chats],
-  );
+  const chatsUnread = useChatsUnreadTotal();
 
   const tabCount = state.routes.length;
   const tabWidth = screenWidth / tabCount;
-  const indicatorPosition = useSharedValue(state.index);
 
-  useEffect(() => {
-    indicatorPosition.value = withTiming(state.index, { duration: 220 });
-  }, [state.index, indicatorPosition]);
-
-  const indicatorStyle = useAnimatedStyle(() => {
-    const x =
-      indicatorPosition.value * tabWidth + (tabWidth - INDICATOR_WIDTH) / 2;
-    return { transform: [{ translateX: x }] };
-  });
+  // Indicator x follows the pager's live (fractional) page position.
+  const indicatorTranslateX = useMemo(() => {
+    const inputRange = state.routes.map((_, i) => i);
+    return position.interpolate({
+      inputRange,
+      outputRange: inputRange.map(
+        (i) => i * tabWidth + (tabWidth - INDICATOR_WIDTH) / 2,
+      ),
+      extrapolate: 'clamp',
+    });
+  }, [position, state.routes, tabWidth]);
 
   return (
     <View
@@ -95,10 +141,14 @@ function CustomTabBar({ state, navigation }: BottomTabBarProps) {
       ]}
     >
       <Animated.View
+        pointerEvents="none"
         style={[
           styles.indicator,
-          { backgroundColor: c.tint, width: INDICATOR_WIDTH },
-          indicatorStyle,
+          {
+            backgroundColor: c.tint,
+            width: INDICATOR_WIDTH,
+            transform: [{ translateX: indicatorTranslateX }],
+          },
         ]}
       />
 
@@ -108,12 +158,24 @@ function CustomTabBar({ state, navigation }: BottomTabBarProps) {
 
         const isFocused = state.index === index;
         const onPress = () => {
-          if (!isFocused) navigation.navigate(route.name);
+          const event = navigation.emit({
+            type: 'tabPress',
+            target: route.key,
+            canPreventDefault: true,
+          });
+          if (!isFocused && !event.defaultPrevented) {
+            navigation.navigate(route.name, route.params);
+          }
+        };
+        const onLongPress = () => {
+          navigation.emit({ type: 'tabLongPress', target: route.key });
         };
 
         return (
           <TabItem
             key={route.key}
+            index={index}
+            position={position}
             label={icon.label}
             activeIcon={icon.active}
             inactiveIcon={icon.inactive}
@@ -123,6 +185,7 @@ function CustomTabBar({ state, navigation }: BottomTabBarProps) {
             badge={route.name === 'Chats' ? chatsUnread : 0}
             badgeColor={c.tint}
             onPress={onPress}
+            onLongPress={onLongPress}
           />
         );
       })}
@@ -131,6 +194,8 @@ function CustomTabBar({ state, navigation }: BottomTabBarProps) {
 }
 
 type TabItemProps = {
+  index: number;
+  position: MaterialTopTabBarProps['position'];
   label: string;
   activeIcon: IoniconName;
   inactiveIcon: IoniconName;
@@ -140,9 +205,12 @@ type TabItemProps = {
   badge?: number;
   badgeColor?: string;
   onPress: () => void;
+  onLongPress: () => void;
 };
 
 function TabItem({
+  index,
+  position,
   label,
   activeIcon,
   inactiveIcon,
@@ -152,36 +220,42 @@ function TabItem({
   badge = 0,
   badgeColor = '#FD425E',
   onPress,
+  onLongPress,
 }: TabItemProps) {
-  const focus = useSharedValue(focused ? 1 : 0);
-
-  useEffect(() => {
-    focus.value = withTiming(focused ? 1 : 0, { duration: 220 });
-  }, [focused, focus]);
-
-  const iconWrapStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: 1 + focus.value * 0.08 }],
-  }));
-
-  const activeIconStyle = useAnimatedStyle(() => ({
-    opacity: focus.value,
-  }));
-
-  const inactiveIconStyle = useAnimatedStyle(() => ({
-    opacity: 1 - focus.value,
-  }));
-
-  const labelStyle = useAnimatedStyle(() => ({
-    opacity: 0.55 + focus.value * 0.45,
-  }));
+  // 1 when this tab is fully selected, 0 when a neighbour (or further) is —
+  // interpolated live from the pager so the cross-fade tracks the finger.
+  const anim = useMemo(() => {
+    const focus = position.interpolate({
+      inputRange: [index - 1, index, index + 1],
+      outputRange: [0, 1, 0],
+      extrapolate: 'clamp',
+    });
+    return {
+      active: focus,
+      inactive: focus.interpolate({ inputRange: [0, 1], outputRange: [1, 0] }),
+      scale: focus.interpolate({ inputRange: [0, 1], outputRange: [1, 1.08] }),
+      inactiveLabel: focus.interpolate({
+        inputRange: [0, 1],
+        outputRange: [0.55, 0],
+      }),
+    };
+  }, [position, index]);
 
   return (
-    <Pressable onPress={onPress} style={styles.tabItem} android_ripple={null}>
-      <Animated.View style={[styles.iconWrap, iconWrapStyle]}>
-        <Animated.View style={[styles.iconLayer, inactiveIconStyle]}>
+    <Pressable
+      onPress={onPress}
+      onLongPress={onLongPress}
+      style={styles.tabItem}
+      android_ripple={null}
+      accessibilityRole="tab"
+      accessibilityState={{ selected: focused }}
+      accessibilityLabel={badge > 0 ? `${label}, ${badge} unread` : label}
+    >
+      <Animated.View style={[styles.iconWrap, { transform: [{ scale: anim.scale }] }]}>
+        <Animated.View style={[styles.iconLayer, { opacity: anim.inactive }]}>
           <Ionicons name={inactiveIcon} size={22} color={inactiveColor} />
         </Animated.View>
-        <Animated.View style={[styles.iconLayer, activeIconStyle]}>
+        <Animated.View style={[styles.iconLayer, { opacity: anim.active }]}>
           <Ionicons name={activeIcon} size={22} color={activeColor} />
         </Animated.View>
         {badge > 0 ? (
@@ -192,18 +266,26 @@ function TabItem({
           </View>
         ) : null}
       </Animated.View>
-      <Animated.View style={labelStyle}>
-        <ThemedText
-          style={[styles.label, { color: focused ? activeColor : inactiveColor }]}
-        >
-          {label}
-        </ThemedText>
-      </Animated.View>
+      <View>
+        <Animated.View style={{ opacity: anim.inactiveLabel }}>
+          <ThemedText style={[styles.label, { color: inactiveColor }]}>
+            {label}
+          </ThemedText>
+        </Animated.View>
+        <Animated.View style={[styles.labelOverlay, { opacity: anim.active }]}>
+          <ThemedText style={[styles.label, { color: activeColor }]}>
+            {label}
+          </ThemedText>
+        </Animated.View>
+      </View>
     </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
+  fill: {
+    flex: 1,
+  },
   tabBar: {
     flexDirection: 'row',
     borderTopWidth: StyleSheet.hairlineWidth,
@@ -254,5 +336,9 @@ const styles = StyleSheet.create({
   label: {
     fontSize: 11,
     fontWeight: '500',
+  },
+  labelOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
   },
 });

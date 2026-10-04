@@ -35,11 +35,12 @@ import {
 import { ThemedText } from '@/components/themed-text';
 import { Colors, Radii, Spacing } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { useChats } from '@/lib/chats-context';
+import { useChatsActions } from '@/lib/chats-context';
 import { useInboxPlanes } from '@/lib/inbox-planes-context';
 import { useSentPlanes } from '@/lib/sent-planes-context';
 import type { LiveSentPlane } from '@/lib/planes-mapper';
 import type { Plane } from '@/types/plane';
+import { withFlag } from '@/lib/countries';
 
 export default function PlaneDetailScreen() {
   const { id, readOnly } = useLocalSearchParams<{
@@ -49,7 +50,7 @@ export default function PlaneDetailScreen() {
   const scheme = useColorScheme() ?? 'light';
   const c = Colors[scheme];
   const router = useRouter();
-  const { acceptPlane } = useChats();
+  const { acceptPlane } = useChatsActions();
   const {
     planes: inboxPlanes,
     accept: acceptInboxPlane,
@@ -189,7 +190,7 @@ export default function PlaneDetailScreen() {
               {[
                 plane.sender.ageBadge || null,
                 plane.sender.distanceKm > 0 ? `${plane.sender.distanceKm} km away` : null,
-                [plane.sender.city, plane.sender.country].filter(Boolean).join(', ') || null,
+                [plane.sender.city, plane.sender.country ? withFlag(plane.sender.country) : null].filter(Boolean).join(', ') || null,
               ]
                 .filter(Boolean)
                 .join(' · ') || 'On Swing'}

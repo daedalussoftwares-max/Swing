@@ -170,6 +170,9 @@ func mergeConfiguration(base, overlay *Configuration) {
 	if overlay.Logging.DebugHTTP {
 		base.Logging.DebugHTTP = true
 	}
+	if overlay.Server.TrustProxy {
+		base.Server.TrustProxy = true
+	}
 	if overlay.Push.FCMServiceAccountFile != "" {
 		base.Push.FCMServiceAccountFile = overlay.Push.FCMServiceAccountFile
 	}

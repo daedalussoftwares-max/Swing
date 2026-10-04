@@ -27,7 +27,7 @@ func Register(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, http.StatusBadRequest, "INVALID_BODY", "Invalid request body.")
 		return
 	}
-	if msg := validateCredentials(body.Email, body.Password); msg != "" {
+	if msg := validateNewCredentials(body.Email, body.Password); msg != "" {
 		httpx.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", msg)
 		return
 	}
@@ -93,6 +93,26 @@ func Logout(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = common.Auth.Logout(r.Context(), body.RefreshToken)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// Limits for new passwords. Login keeps the old 6-char minimum so existing
+// accounts can still sign in; bcrypt only accepts up to 72 bytes.
+const (
+	minNewPasswordLen = 8
+	maxPasswordBytes  = 72
+)
+
+func validateNewCredentials(email, password string) string {
+	if msg := validateCredentials(email, password); msg != "" {
+		return msg
+	}
+	if len(password) < minNewPasswordLen {
+		return "Password must be at least 8 characters."
+	}
+	if len(password) > maxPasswordBytes {
+		return "Password must be at most 72 characters."
+	}
+	return ""
 }
 
 func validateCredentials(email, password string) string {

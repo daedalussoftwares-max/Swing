@@ -15,10 +15,13 @@ func writeServiceError(w http.ResponseWriter, r *http.Request, op string, err er
 	switch {
 	case errors.Is(err, auth.ErrEmailInUse):
 		httpx.Error(w, r, http.StatusConflict, "EMAIL_IN_USE", "An account with this email already exists. Try logging in.")
+	case errors.Is(err, auth.ErrInvalidCredentials):
+		// One code for unknown email and wrong password (no account enumeration).
+		httpx.Error(w, r, http.StatusUnauthorized, "INVALID_CREDENTIALS", "Email or password is incorrect.")
+	case errors.Is(err, auth.ErrPasswordTooLong):
+		httpx.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", "Password must be at most 72 characters.")
 	case errors.Is(err, auth.ErrAccountNotFound):
 		httpx.Error(w, r, http.StatusUnauthorized, "USER_NOT_FOUND", "No account with this email. Create one?")
-	case errors.Is(err, auth.ErrWrongPassword):
-		httpx.Error(w, r, http.StatusUnauthorized, "WRONG_PASSWORD", "Incorrect password.")
 	case errors.Is(err, auth.ErrInvalidToken):
 		httpx.Error(w, r, http.StatusUnauthorized, "INVALID_TOKEN", "Session expired. Please sign in again.")
 	case errors.Is(err, auth.ErrUsernameTaken):

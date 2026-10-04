@@ -23,7 +23,12 @@ import {
   readTokens,
   writeTokens,
 } from '@/lib/api/token-storage';
-import { getFreshAccessToken, onSessionExpired } from '@/lib/api/session';
+import {
+  getFreshAccessToken,
+  onSessionExpired,
+  refreshSession,
+} from '@/lib/api/session';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { uploadAndSaveAvatar } from '@/lib/upload-media';
 import { unregisterPushToken } from '@/lib/push/unregister';
 
@@ -54,6 +59,11 @@ export const emailSchema = z.email('Please enter a valid email');
 export const passwordSchema = z
   .string()
   .min(6, 'Password must be at least 6 characters');
+/** New accounts need a longer password (server enforces 8–72 bytes). */
+export const newPasswordSchema = z
+  .string()
+  .min(8, 'Password must be at least 8 characters')
+  .max(72, 'Password must be at most 72 characters');
 
 function validateEmail(email: string): void {
   const result = emailSchema.safeParse(email.trim());
@@ -63,8 +73,10 @@ function validateEmail(email: string): void {
   }
 }
 
-function validatePassword(password: string): void {
-  const result = passwordSchema.safeParse(password);
+function validatePassword(password: string, isNew = false): void {
+  const result = (isNew ? newPasswordSchema : passwordSchema).safeParse(
+    password,
+  );
   if (!result.success) {
     const msg = result.error.issues[0]?.message ?? 'Invalid password';
     throw new AuthError('INVALID_PASSWORD', msg);
@@ -75,6 +87,7 @@ const API_TO_AUTH: Record<string, AuthErrorCode> = {
   EMAIL_IN_USE: 'EMAIL_IN_USE',
   USER_NOT_FOUND: 'USER_NOT_FOUND',
   WRONG_PASSWORD: 'WRONG_PASSWORD',
+  INVALID_CREDENTIALS: 'INVALID_CREDENTIALS',
   INVALID_TOKEN: 'INVALID_TOKEN',
   INVALID_INPUT: 'INVALID_INPUT',
   USERNAME_TAKEN: 'INVALID_INPUT',
@@ -108,6 +121,48 @@ async function persistSession(
 
 // ── Context plumbing ──────────────────────────────────────────────────────
 
+const USER_CACHE_KEY = 'swing.me.v1';
+
+async function readCachedUser(): Promise<AuthUser | null> {
+  try {
+    const raw = await AsyncStorage.getItem(USER_CACHE_KEY);
+    return raw ? (JSON.parse(raw) as AuthUser) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writeCachedUser(user: AuthUser): Promise<void> {
+  try {
+    await AsyncStorage.setItem(USER_CACHE_KEY, JSON.stringify(user));
+  } catch {
+    /* best effort */
+  }
+}
+
+async function clearCachedUser(): Promise<void> {
+  try {
+    await AsyncStorage.removeItem(USER_CACHE_KEY);
+  } catch {
+    /* best effort */
+  }
+}
+
+/**
+ * GET /v1/me with one refresh-and-retry on 401. Resolves null only when the
+ * session is really over; throws on network/server errors.
+ */
+async function fetchMe(): Promise<AuthUser | null> {
+  if (!(await getFreshAccessToken())) return null;
+  try {
+    // authedFetch already refreshes + retries once on 401.
+    return await authApi.getMe();
+  } catch (e) {
+    if (e instanceof ApiError && e.httpStatus === 401) return null;
+    throw e;
+  }
+}
+
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -120,52 +175,63 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(
     () =>
       onSessionExpired(() => {
+        void clearCachedUser();
         setState({ status: 'signed-out', user: null });
       }),
     [],
   );
 
+  // Bootstrap. The session only ends when the server rejects the refresh
+  // token; offline / server hiccups keep the user signed in (with their
+  // last known profile) and keep retrying in the background.
   useEffect(() => {
-    (async () => {
-      try {
-        const { accessToken, refreshToken } = await readTokens();
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let attempt = 0;
 
-        if (refreshToken) {
-          try {
-            const session = await authApi.refresh(refreshToken);
-            await writeTokens(session.accessToken, session.refreshToken);
-            setState({ status: 'signed-in', user: session.user });
-            return;
-          } catch (e) {
-            if (e instanceof ApiError && e.code === 'INVALID_TOKEN') {
-              await clearTokens();
-            } else if (!(e instanceof ApiError)) {
-              // offline — keep loading until user retries? treat as signed-out
-            }
-          }
-        }
-
-        if (accessToken) {
-          try {
-            const user = await authApi.getMe(accessToken);
-            setState({ status: 'signed-in', user });
-            return;
-          } catch {
-            await clearTokens();
-          }
-        }
-
-        setState({ status: 'signed-out', user: null });
-      } catch {
-        setState({ status: 'signed-out', user: null });
+    const run = async () => {
+      const { accessToken, refreshToken } = await readTokens();
+      if (!accessToken && !refreshToken) {
+        if (!cancelled) setState({ status: 'signed-out', user: null });
+        return;
       }
-    })();
+      try {
+        const session = await refreshSession();
+        if (cancelled) return;
+        if (session) {
+          setState({ status: 'signed-in', user: session.user });
+        } else {
+          await clearCachedUser();
+          setState({ status: 'signed-out', user: null });
+        }
+      } catch {
+        if (cancelled) return;
+        const cached = await readCachedUser();
+        if (cancelled) return;
+        if (cached) {
+          setState((cur) => (cur.status === 'signed-in' ? cur : { status: 'signed-in', user: cached }));
+        }
+        attempt += 1;
+        retryTimer = setTimeout(() => void run(), Math.min(30_000, 2_000 * 2 ** (attempt - 1)));
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+    };
   }, []);
+
+  // Remember the last signed-in profile so a cold start without network
+  // can still open the app.
+  useEffect(() => {
+    if (state.status === 'signed-in' && state.user) void writeCachedUser(state.user);
+  }, [state]);
 
   const signUpWithEmail = useCallback(
     async (email: string, password: string): Promise<AuthUser> => {
       validateEmail(email);
-      validatePassword(password);
+      validatePassword(password, true);
       try {
         const session = await authApi.register(
           email.trim().toLowerCase(),
@@ -233,6 +299,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const signOut = useCallback(async () => {
+    await clearCachedUser();
     await unregisterPushToken(); // before tokens are cleared
     const { refreshToken } = await readTokens();
     if (refreshToken) {
@@ -247,12 +314,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const saveProfile = useCallback(async (patch: ProfilePatchBody) => {
-    const accessToken = await getFreshAccessToken();
-    if (!accessToken) {
-      throw new AuthError('INVALID_TOKEN', 'Session expired. Please sign in again.');
-    }
     try {
-      const user = await authApi.updateProfile(accessToken, patch);
+      const user = await authApi.updateProfile(patch);
       setState({ status: 'signed-in', user });
       return user;
     } catch (e) {
@@ -263,12 +326,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const uploadAvatar = useCallback(async (localUri: string, mimeType?: string) => {
-    const accessToken = await getFreshAccessToken();
-    if (!accessToken) {
-      throw new AuthError('INVALID_TOKEN', 'Session expired. Please sign in again.');
-    }
     try {
-      const user = await uploadAndSaveAvatar(accessToken, localUri, mimeType);
+      const user = await uploadAndSaveAvatar(localUri, mimeType);
       setState({ status: 'signed-in', user });
       return user;
     } catch (e) {
@@ -279,29 +338,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const refreshUser = useCallback(async (): Promise<AuthUser | null> => {
-    const accessToken = await getFreshAccessToken();
-    if (!accessToken) {
-      setState({ status: 'signed-out', user: null });
-      return null;
-    }
     try {
-      const user = await authApi.getMe(accessToken);
+      const user = await fetchMe();
+      if (!user) {
+        setState({ status: 'signed-out', user: null });
+        return null;
+      }
       setState({ status: 'signed-in', user });
       return user;
     } catch {
-      await clearTokens();
-      setState({ status: 'signed-out', user: null });
+      // Transient failure: keep the current session and profile.
       return null;
     }
   }, []);
 
   const deleteAccountRemote = useCallback(async () => {
-    const { accessToken, refreshToken } = await readTokens();
-    if (!accessToken) {
-      throw new AuthError('INVALID_TOKEN', 'Session expired. Please sign in again.');
-    }
+    const { refreshToken } = await readTokens();
     try {
-      await authApi.deleteAccount(accessToken);
+      await authApi.deleteAccount();
     } catch (e) {
       if (e instanceof AuthError) throw e;
       if (e instanceof ApiError) throw mapApiError(e);
@@ -390,6 +444,7 @@ export type AuthErrorCode =
   | 'EMAIL_IN_USE'
   | 'USER_NOT_FOUND'
   | 'WRONG_PASSWORD'
+  | 'INVALID_CREDENTIALS'
   | 'INVALID_TOKEN'
   | 'INVALID_INPUT'
   | 'NETWORK'

@@ -6,7 +6,7 @@
  *   │ Swing ✈            🔔(3)    │  header
  *   │                             │
  *   │  ←  ┌────────────────┐  →   │  card carousel (fixed height)
- *   │     │   plane card   │      │  side arrows enable when applicable
+ *   │     │   plane card   │      │  swipe between cards
  *   │     └────────────────┘      │
  *   │     ─── • • • • ───         │  animated page dots (smooth slide)
  *   │                             │
@@ -56,7 +56,7 @@ import { useTabFocusFade } from '@/hooks/use-tab-focus-fade';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { useAuth } from '@/lib/auth-context';
-import { useChats } from '@/lib/chats-context';
+import { useChatsActions } from '@/lib/chats-context';
 import { useInboxPlanes } from '@/lib/inbox-planes-context';
 import { useNotifications } from '@/lib/notifications-context';
 import { runFirstTimePermissionFlow } from '@/lib/permissions';
@@ -107,7 +107,7 @@ export default function HomeScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const fadeStyle = useTabFocusFade();
   const router = useRouter();
-  const { acceptPlane } = useChats();
+  const { acceptPlane } = useChatsActions();
   const {
     planes: inboxPlanes,
     refresh: refreshInbox,
@@ -258,23 +258,9 @@ export default function HomeScreen() {
     },
   });
 
-  const total = visiblePlanes.length;
-  const hasPrev = index > 0;
-  const hasNext = index < total - 1;
-
   const handleMomentumEnd = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const newIndex = Math.round(e.nativeEvent.contentOffset.x / width);
     if (newIndex !== index) setIndex(newIndex);
-  };
-
-  const goPrev = () => {
-    if (!hasPrev) return;
-    listRef.current?.scrollToIndex({ index: index - 1, animated: true });
-  };
-
-  const goNext = () => {
-    if (!hasNext) return;
-    listRef.current?.scrollToIndex({ index: index + 1, animated: true });
   };
 
   const onRefresh = useCallback(async () => {
@@ -362,7 +348,7 @@ export default function HomeScreen() {
       {/* Body fills the space between header and bottom-tab-bar, and
           vertically centres the (carousel + dots) block inside it.
           Wrapped in a TabSwipeRegion so the empty space above/below the
-          carousel — plus the area around the side arrows — is a tab-swipe
+          carousel is a tab-swipe
           surface. The native FlatList still wins touches that start on a
           card itself, so card-to-card paging is unaffected. */}
       <TabSwipeRegion currentRoute="/" style={styles.body}>
@@ -405,44 +391,12 @@ export default function HomeScreen() {
           />
         )}
 
-        <Pressable
-          onPress={goPrev}
-          disabled={!hasPrev}
-          hitSlop={12}
-          style={[
-            styles.sideArrow,
-            styles.prevArrow,
-            {
-              backgroundColor: c.surface,
-              borderColor: c.border,
-              opacity: hasPrev ? 1 : 0.35,
-            },
-          ]}
-        >
-          <Ionicons name="chevron-back" size={22} color={c.textMuted} />
-        </Pressable>
-
-        <Pressable
-          onPress={goNext}
-          disabled={!hasNext}
-          hitSlop={12}
-          style={[
-            styles.sideArrow,
-            styles.nextArrow,
-            {
-              backgroundColor: c.surface,
-              borderColor: c.border,
-              opacity: hasNext ? 1 : 0.35,
-            },
-          ]}
-        >
-          <Ionicons name="chevron-forward" size={22} color={c.textMuted} />
-        </Pressable>
       </View>
 
       {/* Animated page dots — each dot's width / colour interpolates as
           `scrollX` slides through page boundaries. Wrapped in a TabSwipeRegion
           so the bottom band below the cards is also a tab-swipe surface. */}
+      {visiblePlanes.length > 0 ? (
       <View style={styles.dotsSwipe}>
         <View style={styles.dots}>
           {visiblePlanes.map((_, i) => (
@@ -457,6 +411,7 @@ export default function HomeScreen() {
           ))}
         </View>
       </View>
+      ) : null}
       </TabSwipeRegion>
       </ScrollView>
 
@@ -573,24 +528,6 @@ const styles = StyleSheet.create({
     paddingTop: Spacing.lg,
     paddingBottom: Spacing.xl,
   },
-  sideArrow: {
-    position: 'absolute',
-    top: '50%',
-    marginTop: -18,
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: StyleSheet.hairlineWidth,
-    shadowColor: '#000',
-    shadowOpacity: 0.08,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 3,
-  },
-  prevArrow: { left: Spacing.sm },
-  nextArrow: { right: Spacing.sm },
   emptyInbox: {
     flex: 1,
     alignItems: 'center',

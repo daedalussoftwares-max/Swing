@@ -27,6 +27,7 @@ export type ApiRecipientPreview = {
   name: string;
   avatarUrl?: string;
   location?: string;
+  age?: number;
 };
 
 /** Live delivery state (async matching). */

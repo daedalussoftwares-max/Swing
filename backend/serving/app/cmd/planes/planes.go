@@ -207,7 +207,7 @@ func (s *Service) ListOutbox(ctx context.Context, accountID stdid.UUID) ([]Plane
 			pl.id, pl.message, pl.status, pl.filters, pl.created_at, pl.expires_at,
 			pl.recipient_is_dummy, pl.next_attempt_at IS NOT NULL,
 			ld.status, ld.responded_at, ld.recipient_account_id,
-			r.name, r.username, r.avatar_url, r.city, r.country,
+			r.name, r.username, r.avatar_url, r.city, r.country, r.dob,
 			COALESCE(cnt.hops, 0), COALESCE(cnt.rejections, 0),
 			ch.id
 		FROM planes pl
@@ -250,12 +250,13 @@ func (s *Service) ListOutbox(ctx context.Context, accountID stdid.UUID) ([]Plane
 		var recipientID sql.Null[stdid.UUID]
 		var chatID sql.Null[stdid.UUID]
 		var rName, rUsername, rAvatar, rCity, rCountry sql.NullString
+		var rDOB sql.NullTime
 
 		if err := rows.Scan(
 			&p.ID, &p.Message, &p.Status, &filtersJSON, &p.SentAt, &p.ExpiresAt,
 			&p.RecipientIsDummy, &searching,
 			&deliveryStatus, &respondedAt, &recipientID,
-			&rName, &rUsername, &rAvatar, &rCity, &rCountry,
+			&rName, &rUsername, &rAvatar, &rCity, &rCountry, &rDOB,
 			&p.Hops, &p.Rejections,
 			&chatID,
 		); err != nil {
@@ -276,6 +277,10 @@ func (s *Service) ListOutbox(ctx context.Context, accountID stdid.UUID) ([]Plane
 				Name:      coalesceName(rName.String, rUsername.String),
 				AvatarURL: rAvatar.String,
 				Location:  formatLocation(rCity.String, rCountry.String),
+			}
+			if rDOB.Valid {
+				age := ageOn(rDOB.Time, now)
+				p.Recipient.Age = &age
 			}
 		}
 		if chatID.Valid {
@@ -535,12 +540,17 @@ func recipientPreview(c Candidate) *RecipientPreview {
 	if c.AccountID.IsZero() {
 		return nil
 	}
-	return &RecipientPreview{
+	r := &RecipientPreview{
 		ID:        c.AccountID,
 		Name:      coalesceName(c.Name, c.Username),
 		AvatarURL: c.AvatarURL,
 		Location:  formatLocation(c.City, c.Country),
 	}
+	if c.DOB != nil {
+		age := ageOn(*c.DOB, time.Now())
+		r.Age = &age
+	}
+	return r
 }
 
 func coalesceName(name, username string) string {

@@ -95,6 +95,7 @@ function recipientFromApi(
     name: r.name,
     avatarUrl: r.avatarUrl,
     location: r.location,
+    age: r.age,
   };
 }
 

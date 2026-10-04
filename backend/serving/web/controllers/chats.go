@@ -1,10 +1,12 @@
 package controllers
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"lib/stdid"
 
@@ -12,6 +14,7 @@ import (
 	"serving/app/cmd/common"
 	"serving/app/pkg/httpx"
 	"serving/app/pkg/logx"
+	"serving/app/pkg/r2storage"
 	"serving/web/middlewares/bearer"
 )
 
@@ -109,6 +112,18 @@ func SendChatMessage(w http.ResponseWriter, r *http.Request) {
 	var body sendMessageBody
 	if err := httpx.DecodeJSONLenient(r, &body); err != nil {
 		httpx.Error(w, r, http.StatusBadRequest, "INVALID_BODY", "Invalid request body.")
+		return
+	}
+	if msg := validateSendBody(&body); msg != "" {
+		httpx.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", msg)
+		return
+	}
+	if status, msg := verifyUploadedMedia(r.Context(), &body); status != 0 {
+		if status >= http.StatusInternalServerError {
+			writeChatServiceError(w, r, "chats.send.head_media", errors.New(msg))
+			return
+		}
+		httpx.Error(w, r, status, "INVALID_INPUT", msg)
 		return
 	}
 	in := chats.SendInput{
@@ -213,6 +228,10 @@ func SetChatReaction(w http.ResponseWriter, r *http.Request) {
 	var body reactionBody
 	if err := httpx.DecodeJSONLenient(r, &body); err != nil {
 		httpx.Error(w, r, http.StatusBadRequest, "INVALID_BODY", "Invalid request body.")
+		return
+	}
+	if e := strings.TrimSpace(body.Emoji); e == "" || len(e) > maxReactionBytes {
+		httpx.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", "Invalid reaction.")
 		return
 	}
 	if err := common.Chats.SetReaction(r.Context(), accountID, chatID, messageID, body.Emoji); err != nil {
@@ -406,6 +425,73 @@ func RegisterDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// Input caps enforced at the controller (app/cmd/chats validates the rest).
+const (
+	maxCaptionBytes     = 4000 // same as chats text-message limit
+	maxReactionBytes    = 16
+	maxClientMsgIDBytes = 128
+	maxMediaFieldBytes  = 255 // mime, file_name, thumb_key, r2_key
+	headMediaTimeout    = 5 * time.Second
+)
+
+func validateSendBody(b *sendMessageBody) string {
+	msgType := strings.TrimSpace(b.Type)
+	if msgType != "" && msgType != chats.TypeText && len(strings.TrimSpace(b.Text)) > maxCaptionBytes {
+		return "Caption is too long."
+	}
+	if len(b.ClientMsgID) > maxClientMsgIDBytes {
+		return "Invalid client_msg_id."
+	}
+	if m := b.Media; m != nil {
+		if len(m.R2Key) > maxMediaFieldBytes || len(m.Mime) > maxMediaFieldBytes ||
+			len(m.FileName) > maxMediaFieldBytes || len(m.ThumbKey) > maxMediaFieldBytes ||
+			len(m.URL) > 2048 {
+			return "Invalid media."
+		}
+	}
+	return ""
+}
+
+// maxUploadBytes is the per-type cap on stored media. Presigned PUTs can't
+// limit size, so the stored object is HEADed before a message may use it.
+func maxUploadBytes(msgType string) int64 {
+	switch msgType {
+	case chats.TypeVideo:
+		return 50 << 20
+	case chats.TypeDocument:
+		return 20 << 20
+	default: // image, audio, sticker
+		return 10 << 20
+	}
+}
+
+// verifyUploadedMedia HEADs the referenced R2 object (only when R2 is
+// configured) and rejects missing or oversized uploads. On success the
+// declared size is replaced with the real one. Returns (0, "") when OK.
+func verifyUploadedMedia(ctx context.Context, b *sendMessageBody) (int, string) {
+	if common.R2 == nil || b.Media == nil {
+		return 0, ""
+	}
+	key := strings.TrimSpace(b.Media.R2Key)
+	if key == "" {
+		return 0, "" // chats.Send rejects/normalises missing keys
+	}
+	ctx, cancel := context.WithTimeout(ctx, headMediaTimeout)
+	defer cancel()
+	info, err := common.R2.HeadObject(ctx, key)
+	switch {
+	case errors.Is(err, r2storage.ErrObjectNotFound), errors.Is(err, r2storage.ErrInvalidMediaKey):
+		return http.StatusBadRequest, "Upload not found. Please try again."
+	case err != nil:
+		return http.StatusInternalServerError, err.Error()
+	}
+	if info.Size > maxUploadBytes(strings.TrimSpace(b.Type)) {
+		return http.StatusBadRequest, "File is too large."
+	}
+	b.Media.Size = info.Size
+	return 0, ""
 }
 
 func parseIntQuery(r *http.Request, key string, def int) int {

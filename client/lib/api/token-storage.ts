@@ -13,6 +13,12 @@ type Tokens = {
 // in-memory copy and only touch secure storage on cold start and writes.
 let cache: Tokens | null = null;
 let loading: Promise<Tokens> | null = null;
+/** Bumped on sign-out so an in-flight refresh can't resurrect tokens. */
+let generation = 0;
+
+export function tokenGeneration(): number {
+  return generation;
+}
 
 export async function readTokens(): Promise<Tokens> {
   if (cache) return cache;
@@ -35,6 +41,7 @@ export async function writeTokens(accessToken: string, refreshToken: string) {
 }
 
 export async function clearTokens() {
+  generation += 1;
   cache = { accessToken: null, refreshToken: null };
   await SecureStore.deleteItemAsync(ACCESS_KEY);
   await SecureStore.deleteItemAsync(REFRESH_KEY);

@@ -33,7 +33,7 @@ import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useRealtimeConnected } from '@/hooks/use-realtime-connected';
 import { useRefreshOnFocus } from '@/hooks/use-refresh-on-focus';
 import { useTabFocusFade } from '@/hooks/use-tab-focus-fade';
-import { useChats } from '@/lib/chats-context';
+import { useChatList, useChatsActions, useChatsMeta } from '@/lib/chats-context';
 import { useUserSettings } from '@/lib/user-settings-context';
 import type { Chat } from '@/types/chat';
 
@@ -41,7 +41,9 @@ export default function ChatsScreen() {
   const scheme = useColorScheme() ?? 'light';
   const c = Colors[scheme];
   const router = useRouter();
-  const { chats, refresh: refreshChats, loaded } = useChats();
+  const chats = useChatList();
+  const { refresh: refreshChats } = useChatsActions();
+  const { loaded } = useChatsMeta();
   const connected = useRealtimeConnected();
   const { user } = useUserSettings();
   const fadeStyle = useTabFocusFade();

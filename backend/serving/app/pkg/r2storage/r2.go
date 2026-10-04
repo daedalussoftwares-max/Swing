@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"path"
 	"strings"
 	"time"
@@ -11,8 +12,10 @@ import (
 	"lib/stdid"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
 
 var (
@@ -20,6 +23,7 @@ var (
 	ErrInvalidMIME      = errors.New("invalid content type")
 	ErrInvalidAvatarURL = errors.New("invalid avatar url")
 	ErrInvalidMediaKey  = errors.New("invalid media key")
+	ErrObjectNotFound   = errors.New("object not found")
 )
 
 // Scope is the top-level R2 folder for a media type.
@@ -55,6 +59,7 @@ func (c Config) Enabled() bool {
 type Client struct {
 	bucket        string
 	publicBaseURL string
+	s3            *s3.Client
 	presigner     *s3.PresignClient
 }
 
@@ -102,6 +107,7 @@ func New(cfg Config) (*Client, error) {
 	return &Client{
 		bucket:        strings.TrimSpace(cfg.Bucket),
 		publicBaseURL: publicBase,
+		s3:            s3Client,
 		presigner:     s3.NewPresignClient(s3Client),
 	}, nil
 }
@@ -272,6 +278,87 @@ func (c *Client) PresignGet(ctx context.Context, mediaKey string) (string, error
 		return "", fmt.Errorf("presign get: %w", err)
 	}
 	return out.URL, nil
+}
+
+// PresignGetTTL is PresignGet with a custom lifetime (e.g. ~60s for
+// view-once media).
+func (c *Client) PresignGetTTL(ctx context.Context, mediaKey string, ttl time.Duration) (string, error) {
+	if err := ValidateMediaKey(mediaKey); err != nil {
+		return "", err
+	}
+	out, err := c.presigner.PresignGetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(mediaKey),
+	}, s3.WithPresignExpires(ttl))
+	if err != nil {
+		return "", fmt.Errorf("presign get: %w", err)
+	}
+	return out.URL, nil
+}
+
+// DeleteObject removes an object (missing objects are not an error).
+func (c *Client) DeleteObject(ctx context.Context, mediaKey string) error {
+	if err := ValidateMediaKey(mediaKey); err != nil {
+		return err
+	}
+	_, err := c.s3.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(mediaKey),
+	})
+	if err != nil {
+		return fmt.Errorf("delete object: %w", err)
+	}
+	return nil
+}
+
+// ChatKeyPrefix is the folder every chat upload by owner into chatID lives
+// under: chat/<owner>/<chatID>/ (see PresignPut).
+func ChatKeyPrefix(ownerID stdid.UUID, chatID string) string {
+	return fmt.Sprintf("%s/%s/%s/", ScopeChat, ownerID.String(), sanitizePathSegment(chatID))
+}
+
+// ParseOwnedKey splits "<scope>/<owner>/..." into scope, owner and the rest.
+func ParseOwnedKey(key string) (Scope, stdid.UUID, string, bool) {
+	parts := strings.SplitN(strings.TrimSpace(key), "/", 3)
+	if len(parts) < 3 || strings.Contains(key, "..") {
+		return "", stdid.UUID{}, "", false
+	}
+	owner, err := stdid.Parse(parts[1])
+	if err != nil {
+		return "", stdid.UUID{}, "", false
+	}
+	return Scope(parts[0]), owner, parts[2], true
+}
+
+// ObjectInfo is the subset of HEAD metadata callers need.
+type ObjectInfo struct {
+	Size        int64
+	ContentType string
+}
+
+// HeadObject returns the stored size of mediaKey (one R2 round trip).
+// Missing objects return ErrObjectNotFound.
+func (c *Client) HeadObject(ctx context.Context, mediaKey string) (ObjectInfo, error) {
+	if err := ValidateMediaKey(mediaKey); err != nil {
+		return ObjectInfo{}, err
+	}
+	out, err := c.s3.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(mediaKey),
+	})
+	if err != nil {
+		var nf *types.NotFound
+		var re *awshttp.ResponseError
+		if errors.As(err, &nf) || (errors.As(err, &re) && re.HTTPStatusCode() == http.StatusNotFound) {
+			return ObjectInfo{}, ErrObjectNotFound
+		}
+		return ObjectInfo{}, fmt.Errorf("head object: %w", err)
+	}
+	info := ObjectInfo{ContentType: aws.ToString(out.ContentType)}
+	if out.ContentLength != nil {
+		info.Size = *out.ContentLength
+	}
+	return info, nil
 }
 
 func ValidateMediaKey(key string) error {

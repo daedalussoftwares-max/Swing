@@ -48,7 +48,6 @@ import { Colors, Radii, Spacing } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { deleteStatusItem, listMyStatus } from '@/lib/api/media-api';
 import { humanizeAuthError, useAuth } from '@/lib/auth-context';
-import { getFreshAccessToken } from '@/lib/api/session';
 import { apiStatusToLocal } from '@/lib/status-from-api';
 import { uploadStatusDraft } from '@/lib/upload-media';
 import {
@@ -82,9 +81,7 @@ export default function StatusScreen() {
       if (auth.status !== 'signed-in') return;
       (async () => {
         try {
-          const accessToken = await getFreshAccessToken();
-          if (!accessToken) return;
-          const items = await listMyStatus(accessToken);
+          const items = await listMyStatus();
           updateUser({ statusItems: items.map(apiStatusToLocal) });
         } catch {
           /* keep local cache */
@@ -196,10 +193,7 @@ export default function StatusScreen() {
         const target = posted[activeIndex];
         if (target?.id && auth.status === 'signed-in') {
           try {
-            const accessToken = await getFreshAccessToken();
-            if (accessToken) {
-              await deleteStatusItem(accessToken, target.id);
-            }
+            await deleteStatusItem(target.id);
           } catch (e) {
             Alert.alert(
               'Could not remove',
@@ -260,11 +254,9 @@ export default function StatusScreen() {
 
     setUploading(true);
     try {
-      const accessToken = await getFreshAccessToken();
-      if (!accessToken) throw new Error('no token');
       const uploaded: StatusItem[] = [];
       for (const d of drafts) {
-        const item = await uploadStatusDraft(accessToken, d.uri, d.kind);
+        const item = await uploadStatusDraft(d.uri, d.kind);
         uploaded.push(apiStatusToLocal(item));
       }
       updateUser({

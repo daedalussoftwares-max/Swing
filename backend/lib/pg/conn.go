@@ -7,11 +7,11 @@ import (
 	"strings"
 )
 
-// errIPv6OnlyHost is returned when DNS has no A record for the database host.
-var errIPv6OnlyHost = fmt.Errorf("database hostname has no IPv4 address")
+// errNoDatabaseHostIP is returned when DNS has no usable address for the database host.
+var errNoDatabaseHostIP = fmt.Errorf("database hostname has no IP address")
 
-// resolveDatabaseURL rewrites Neon-style URLs so lib/pq dials IPv4 (hostaddr)
-// while keeping the original hostname for TLS (host query param).
+// resolveDatabaseURL rewrites remote URLs so lib/pq dials a concrete IP (hostaddr),
+// preferring IPv4 when available, while keeping the original hostname for TLS (host query param).
 func resolveDatabaseURL(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -38,17 +38,25 @@ func resolveDatabaseURL(raw string) (string, error) {
 		return raw, fmt.Errorf("lookup database host %q: %w", host, err)
 	}
 
-	var v4 net.IP
+	var dial net.IP
 	for _, ip := range ips {
 		if ip4 := ip.To4(); ip4 != nil {
-			v4 = ip4
+			dial = ip4
 			break
 		}
 	}
-	if v4 == nil {
+	if dial == nil {
+		for _, ip := range ips {
+			if ip.To4() == nil && ip.To16() != nil {
+				dial = ip
+				break
+			}
+		}
+	}
+	if dial == nil {
 		return "", fmt.Errorf(
-			"%w: %q — use Neon \"Pooled connection\" URL, add ?hostaddr=<IPv4>, or use local Postgres (see postman/README or docker-compose)",
-			errIPv6OnlyHost,
+			"%w: %q — use Neon \"Pooled connection\" URL, add ?hostaddr=<IP>, or use local Postgres (see backend/docker-compose.yml)",
+			errNoDatabaseHostIP,
 			host,
 		)
 	}
@@ -60,7 +68,7 @@ func resolveDatabaseURL(raw string) (string, error) {
 
 	q.Set("host", host)
 	q.Set("port", port)
-	q.Set("hostaddr", v4.String())
+	q.Set("hostaddr", dial.String())
 
 	// lib/pq: put host in query params only so dial uses hostaddr (IPv4).
 	out := url.URL{

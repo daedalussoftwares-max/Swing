@@ -12,6 +12,7 @@ import (
 	"serving/app/cmd/notifications"
 	"serving/app/cmd/planes"
 	"serving/app/cmd/push"
+	"serving/app/pkg/background"
 	"serving/app/pkg/logx"
 	"serving/app/pkg/realtime"
 )
@@ -112,26 +113,23 @@ func (p *PlaneSink) PlaneAccepted(
 
 // pushAsync sends a push off the request path, only when the user's app
 // is not in the foreground (the WebSocket covers foreground delivery).
-func (p *PlaneSink) pushAsync(ctx context.Context, userID stdid.UUID, n push.Notification) {
+func (p *PlaneSink) pushAsync(_ context.Context, userID stdid.UUID, n push.Notification) {
 	if p.Push == nil || userID.IsZero() {
 		return
 	}
 	if p.Hub != nil && p.Hub.IsForeground(userID) {
 		return
 	}
-	ctx = context.WithoutCancel(ctx)
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				logx.Error("push: plane sink panic", fmt.Errorf("%v", r))
-			}
-		}()
-		ctx, cancel := context.WithTimeout(ctx, pushTimeout)
+	// Bounded worker pool (panics are recovered there); the job context is
+	// detached from the dispatcher/request and only cancelled if shutdown
+	// times out.
+	background.Submit("push.plane", func(bg context.Context) {
+		ctx, cancel := context.WithTimeout(bg, pushTimeout)
 		defer cancel()
 		if err := p.Push.Notify(ctx, userID, n); err != nil {
 			logx.Warn("push: plane notification failed", "type", n.Data["type"], "err", err.Error())
 		}
-	}()
+	})
 }
 
 func pushPreview(s, fallback string) string {

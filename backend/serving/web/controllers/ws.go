@@ -12,6 +12,7 @@ import (
 	"lib/stdid"
 
 	"serving/app/cmd/common"
+	"serving/app/pkg/background"
 	"serving/app/pkg/logx"
 	"serving/app/pkg/realtime"
 	"serving/app/pkg/requestid"
@@ -86,11 +87,15 @@ func RealtimeWS(w http.ResponseWriter, r *http.Request) {
 	firstConn := common.Realtime.ConnCount(userID) == 0
 	common.Realtime.Register(rtConn)
 	if common.Chats != nil && firstConn {
-		go common.Chats.OnRealtimeConnect(context.Background(), userID)
+		background.Submit("ws.presence_connect", func(ctx context.Context) {
+			common.Chats.OnRealtimeConnect(ctx, userID)
+		})
 	}
 	defer func() {
 		if common.Realtime.Unregister(rtConn) && common.Chats != nil {
-			go common.Chats.OnRealtimeDisconnect(context.Background(), userID)
+			background.Submit("ws.presence_disconnect", func(ctx context.Context) {
+				common.Chats.OnRealtimeDisconnect(ctx, userID)
+			})
 		}
 	}()
 

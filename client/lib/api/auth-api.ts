@@ -1,3 +1,4 @@
+import { authedFetch } from '@/lib/api/authed-fetch';
 import { apiFetch } from '@/lib/api/client';
 import type {
   AuthSessionResponse,
@@ -57,30 +58,22 @@ export async function logout(refreshToken: string): Promise<void> {
   });
 }
 
-export async function getMe(accessToken: string): Promise<AuthUser> {
-  const res = await apiFetch<MeResponse>('/v1/me', {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+/** GET /v1/me with the current session (auto-refresh + 401 retry). */
+export async function getMe(): Promise<AuthUser> {
+  const res = await authedFetch<MeResponse>('/v1/me');
   return res.user;
 }
 
-export async function updateProfile(
-  accessToken: string,
-  patch: ProfilePatchBody,
-): Promise<AuthUser> {
-  const res = await apiFetch<MeResponse>('/v1/me', {
+export async function updateProfile(patch: ProfilePatchBody): Promise<AuthUser> {
+  const res = await authedFetch<MeResponse>('/v1/me', {
     method: 'PATCH',
-    headers: { Authorization: `Bearer ${accessToken}` },
     body: JSON.stringify(patch),
   });
   return res.user;
 }
 
-export async function deleteAccount(accessToken: string): Promise<void> {
-  await apiFetch<void>('/v1/me', {
-    method: 'DELETE',
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
+export async function deleteAccount(): Promise<void> {
+  await authedFetch<void>('/v1/me', { method: 'DELETE' });
 }
 
 export async function checkUsernameAvailable(

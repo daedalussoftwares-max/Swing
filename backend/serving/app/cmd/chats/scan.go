@@ -40,7 +40,7 @@ func scanMessage(
 	if body.Valid {
 		m.Body = &body.String
 	}
-	if len(mediaRaw) > 0 {
+	if len(mediaRaw) > 0 && !deletedAt.Valid {
 		meta, err := parseMediaJSON(mediaRaw)
 		if err != nil {
 			return Message{}, err

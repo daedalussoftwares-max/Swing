@@ -89,9 +89,8 @@ import { ThemedText } from '@/components/themed-text';
 import { Colors, Radii, Spacing } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useRefreshOnAppActive } from '@/hooks/use-refresh-on-app-active';
-import { getFreshAccessToken } from '@/lib/api/session';
 import { useAuth } from '@/lib/auth-context';
-import { useChats } from '@/lib/chats-context';
+import { useChat, useChatsActions } from '@/lib/chats-context';
 import { isLocalMediaUri, refreshMediaViewUrl } from '@/lib/upload-media';
 import type { ChatMessage } from '@/types/chat';
 
@@ -132,7 +131,6 @@ export default function ChatScreen() {
   const auth = useAuth();
   const signedIn = auth.status === 'signed-in' && !!auth.user?.id;
   const {
-    chats,
     refresh,
     sendMessage,
     retryMessage,
@@ -147,12 +145,10 @@ export default function ChatScreen() {
     openViewOnce,
     loadMessages,
     loadOlderMessages,
-  } = useChats();
+  } = useChatsActions();
 
-  const chat = useMemo(() => {
-    const key = chatId?.trim().toLowerCase();
-    return key ? chats.find((x) => x.id.toLowerCase() === key) : undefined;
-  }, [chats, chatId]);
+  // Subscribes to THIS chat only — other chats' activity doesn't re-render.
+  const chat = useChat(chatId);
   const chatExists = !!chat;
   const [lookupDone, setLookupDone] = useState(false);
   // Messages newer than this animate in; history doesn't.
@@ -258,7 +254,12 @@ export default function ChatScreen() {
   const rowActions = useMemo<RowActions>(
     () => ({
       longPress: (m) => {
-        if (m.deletedAt || m.status === 'failed' || m.status === 'sending') return;
+        if (m.status === 'failed') {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          setFailedTarget(m);
+          return;
+        }
+        if (m.deletedAt || m.status === 'sending') return;
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
         setActiveMessage({ id: m.id, isMine: m.authorId === 'me' });
       },
@@ -790,7 +791,8 @@ export default function ChatScreen() {
                 {
                   id: 'discard',
                   icon: 'trash-outline',
-                  label: 'Delete',
+                  label: 'Delete message',
+                  destructive: true,
                   onPress: () => {
                     discardMessage(chat.id, failedTarget.clientMsgId!);
                     setFailedTarget(null);
@@ -1827,13 +1829,10 @@ function AudioBubble({
       // Presigned URLs expire after an hour — mint a new one and retry.
       if (mediaKey && !isLocalMediaUri(playUri)) {
         try {
-          const token = await getFreshAccessToken();
-          if (token) {
-            const next = await refreshMediaViewUrl(token, mediaKey);
-            setFreshUri(next);
-            await voicePlayer.toggle(next);
-            return;
-          }
+          const next = await refreshMediaViewUrl(mediaKey);
+          setFreshUri(next);
+          await voicePlayer.toggle(next);
+          return;
         } catch {
           /* fall through to the alert */
         }
@@ -1902,11 +1901,8 @@ function ChatImage({
   const onError = () => {
     if (retried || !mediaKey || isLocalMediaUri(uri)) return;
     setRetried(true);
-    void getFreshAccessToken()
-      .then((token) => (token ? refreshMediaViewUrl(token, mediaKey) : null))
-      .then((next) => {
-        if (next) setFresh(next);
-      })
+    void refreshMediaViewUrl(mediaKey)
+      .then((next) => setFresh(next))
       .catch(() => {});
   };
   return (
@@ -1956,7 +1952,7 @@ function StatusLabel({
 
   switch (status) {
     case 'failed':
-      label = 'Not sent · Tap to retry';
+      label = 'Not sent · Tap to retry or delete';
       icon = 'alert-circle';
       color = '#EF4444';
       break;

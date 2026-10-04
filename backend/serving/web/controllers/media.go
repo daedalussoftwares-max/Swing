@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 
+	"lib/stdid"
+
 	"serving/app/cmd/common"
 	"serving/app/pkg/httpx"
 	"serving/app/pkg/r2storage"
@@ -35,13 +37,18 @@ func ChatUploadURL(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, r, http.StatusBadRequest, "INVALID_BODY", "Invalid request body.")
 		return
 	}
-	chatID := strings.TrimSpace(body.ChatID)
-	if chatID == "" {
+	chatID, err := stdid.Parse(strings.TrimSpace(body.ChatID))
+	if err != nil {
 		httpx.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", "chatId is required.")
 		return
 	}
+	// Only members may upload into a chat's folder.
+	if !common.Chats.IsMember(r.Context(), accountID, chatID) {
+		httpx.Error(w, r, http.StatusForbidden, "FORBIDDEN", "You can't access this chat.")
+		return
+	}
 
-	slot, err := common.R2.PresignChatPut(r.Context(), accountID, chatID, body.ContentType)
+	slot, err := common.R2.PresignChatPut(r.Context(), accountID, chatID.String(), body.ContentType)
 	if err != nil {
 		if errors.Is(err, r2storage.ErrInvalidMIME) {
 			httpx.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", "Use a JPEG, PNG, WebP image or audio clip.")
@@ -54,7 +61,7 @@ func ChatUploadURL(w http.ResponseWriter, r *http.Request) {
 }
 
 func MediaReadURL(w http.ResponseWriter, r *http.Request) {
-	_, ok := bearer.UserIDFromContext(r.Context())
+	accountID, ok := bearer.UserIDFromContext(r.Context())
 	if !ok {
 		httpx.Error(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "Not signed in.")
 		return
@@ -66,6 +73,19 @@ func MediaReadURL(w http.ResponseWriter, r *http.Request) {
 	var body mediaReadURLBody
 	if err := httpx.DecodeJSONLenient(r, &body); err != nil {
 		httpx.Error(w, r, http.StatusBadRequest, "INVALID_BODY", "Invalid request body.")
+		return
+	}
+
+	// Signs only media the caller is allowed to see (chat member with a
+	// visible message, story friend, own upload). 404 otherwise — don't
+	// reveal whether the key exists.
+	allowed, err := common.Chats.CanReadMedia(r.Context(), accountID, body.MediaKey)
+	if err != nil {
+		writeServiceError(w, r, "media.read_url", err)
+		return
+	}
+	if !allowed {
+		httpx.Error(w, r, http.StatusNotFound, "NOT_FOUND", "Media not found.")
 		return
 	}
 

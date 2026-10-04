@@ -11,22 +11,28 @@ import (
 	"lib/pg"
 	"lib/stdid"
 	"lib/stdpasswd"
+
+	"serving/app/pkg/logx"
 )
 
 var (
-	ErrEmailInUse     = errors.New("email in use")
+	ErrEmailInUse      = errors.New("email in use")
 	ErrAccountNotFound = errors.New("account not found")
-	ErrUserNotFound   = ErrAccountNotFound // controllers alias
-	ErrWrongPassword  = errors.New("wrong password")
-	ErrInvalidToken   = errors.New("invalid refresh token")
-	ErrNothingToUpdate = errors.New("nothing to update")
-	ErrInvalidInput   = errors.New("invalid input")
+	ErrUserNotFound    = ErrAccountNotFound // controllers alias
+	// ErrInvalidCredentials is the single login failure: unknown email,
+	// wrong password and Google-only accounts are indistinguishable.
+	ErrInvalidCredentials = errors.New("invalid credentials")
+	ErrWrongPassword      = ErrInvalidCredentials
+	ErrPasswordTooLong    = stdpasswd.ErrPasswordTooLong
+	ErrInvalidToken       = errors.New("invalid refresh token")
+	ErrNothingToUpdate    = errors.New("nothing to update")
+	ErrInvalidInput       = errors.New("invalid input")
 )
 
 type Service struct {
-	db               *sql.DB
-	tokens           *TokenService
-	googleClientIDs  []string
+	db              *sql.DB
+	tokens          *TokenService
+	googleClientIDs []string
 }
 
 func NewService(database *sql.DB, tokens *TokenService, googleClientIDs []string) *Service {
@@ -87,16 +93,41 @@ func (s *Service) Login(ctx context.Context, email, password string) (AuthRespon
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, password_hash FROM accounts WHERE email = $1
 	`, email).Scan(&accountID, &passwordHash)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return AuthResponse{}, ErrAccountNotFound
-		}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return AuthResponse{}, err
 	}
-	if !passwordHash.Valid || !stdpasswd.Compare(passwordHash.String, password) {
-		return AuthResponse{}, ErrWrongPassword
+	if err != nil || !passwordHash.Valid {
+		// Unknown email or Google-only account: spend the same CPU as a real
+		// check so timing doesn't reveal which accounts exist.
+		stdpasswd.CompareDummy(password)
+		return AuthResponse{}, ErrInvalidCredentials
+	}
+	if !stdpasswd.Compare(passwordHash.String, password) {
+		return AuthResponse{}, ErrInvalidCredentials
+	}
+	if stdpasswd.NeedsRehash(passwordHash.String) {
+		s.upgradePasswordHash(ctx, accountID, passwordHash.String, password)
 	}
 	return s.issueSession(ctx, accountID)
+}
+
+// upgradePasswordHash transparently replaces a legacy (or low-cost) hash
+// after a successful login. One-time cost per account; failures are logged
+// and never block the login.
+func (s *Service) upgradePasswordHash(ctx context.Context, accountID stdid.UUID, oldHash, password string) {
+	newHash, err := stdpasswd.Hash(password)
+	if err != nil {
+		// e.g. legacy password longer than bcrypt's 72-byte limit; keep the old hash.
+		logx.Warn("auth: password rehash skipped", "account_id", accountID.String(), "err", err.Error())
+		return
+	}
+	// Compare-and-swap on the old hash so a concurrent password change wins.
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE accounts SET password_hash = $3, updated_at = NOW()
+		WHERE id = $1 AND password_hash = $2
+	`, accountID, oldHash, newHash); err != nil {
+		logx.Error("auth: password rehash failed", err, "account_id", accountID.String())
+	}
 }
 
 func (s *Service) LoginGoogle(ctx context.Context, idToken string) (AuthResponse, error) {
@@ -116,21 +147,37 @@ func (s *Service) LoginGoogle(ctx context.Context, idToken string) (AuthResponse
 		return AuthResponse{}, err
 	}
 
-	// Link to existing email/password account when email matches.
+	// Link to an existing email/password account when the email matches.
+	// Register never verifies email ownership, so anyone could have
+	// pre-registered this address. A verified Google token proves ownership:
+	// drop the password and revoke every refresh token so a squatter loses
+	// access, then issue the new session. One statement = atomic and one
+	// round trip.
+	//
+	// Revoked tokens are backdated past Refresh's rotation grace window
+	// (refreshGrace), otherwise a just-revoked token could still be rotated.
+	// Accounts already linked to a different Google sub are never relinked
+	// (they fall through to the insert below and fail with ErrEmailInUse).
 	err = s.db.QueryRowContext(ctx, `
-		SELECT id FROM accounts WHERE email = $1
-	`, info.Email).Scan(&accountID)
+		WITH linked AS (
+			UPDATE accounts
+			SET google_sub = $2, password_hash = NULL, updated_at = NOW()
+			WHERE email = $1 AND google_sub IS NULL
+			RETURNING id
+		), revoked AS (
+			UPDATE refresh_tokens rt
+			SET revoked_at = NOW() - INTERVAL '1 day'
+			FROM linked
+			WHERE rt.account_id = linked.id
+			  AND (rt.revoked_at IS NULL OR rt.revoked_at > NOW() - INTERVAL '1 day')
+		)
+		SELECT id FROM linked
+	`, info.Email, info.Sub).Scan(&accountID)
 	if err == nil {
-		_, err = s.db.ExecContext(ctx, `
-			UPDATE accounts SET google_sub = $2, updated_at = NOW() WHERE id = $1
-		`, accountID, info.Sub)
-		if err != nil {
-			if pg.IsUniqueViolation(err) {
-				return AuthResponse{}, ErrEmailInUse
-			}
-			return AuthResponse{}, err
-		}
 		return s.issueSession(ctx, accountID)
+	}
+	if pg.IsUniqueViolation(err) {
+		return AuthResponse{}, ErrEmailInUse
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return AuthResponse{}, err
@@ -169,31 +216,75 @@ func (s *Service) LoginGoogle(ctx context.Context, idToken string) (AuthResponse
 	return s.issueSession(ctx, accountID)
 }
 
+// refreshGrace lets a just-rotated refresh token be presented again for a
+// short while. Mobile clients routinely lose the refresh response (app
+// backgrounded, network drop); without a grace window that lost response
+// would leave them holding a dead token and they'd be logged out.
+const refreshGrace = 60 * time.Second
+
+// Refresh rotates a refresh token. Claiming the old token and storing the
+// new one happen in one transaction, so a failure can never leave the
+// client without a valid token.
 func (s *Service) Refresh(ctx context.Context, refreshRaw string) (AuthResponse, error) {
 	hash := HashRefreshToken(refreshRaw)
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AuthResponse{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	var accountID stdid.UUID
-	var tokenID stdid.UUID
-	var expiresAt time.Time
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, account_id, expires_at
-		FROM refresh_tokens
-		WHERE token_hash = $1 AND revoked_at IS NULL
-	`, hash).Scan(&tokenID, &accountID, &expiresAt)
+	err = tx.QueryRowContext(ctx, `
+		UPDATE refresh_tokens
+		SET revoked_at = COALESCE(revoked_at, NOW())
+		WHERE token_hash = $1
+		  AND expires_at > NOW()
+		  AND (revoked_at IS NULL OR revoked_at > NOW() - make_interval(secs => $2))
+		RETURNING account_id
+	`, hash, refreshGrace.Seconds()).Scan(&accountID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return AuthResponse{}, ErrInvalidToken
 		}
 		return AuthResponse{}, err
 	}
-	if time.Now().UTC().After(expiresAt) {
-		return AuthResponse{}, ErrInvalidToken
+
+	refreshNew, err := s.insertRefreshToken(ctx, tx, accountID)
+	if err != nil {
+		return AuthResponse{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return AuthResponse{}, err
 	}
 
-	_, _ = s.db.ExecContext(ctx, `
-		UPDATE refresh_tokens SET revoked_at = NOW() WHERE id = $1
-	`, tokenID)
+	me, err := s.GetMe(ctx, accountID)
+	if err != nil {
+		return AuthResponse{}, err
+	}
+	access, _, err := s.tokens.IssueAccess(accountID)
+	if err != nil {
+		return AuthResponse{}, err
+	}
+	return AuthResponse{User: me, AccessToken: access, RefreshToken: refreshNew}, nil
+}
 
-	return s.issueSession(ctx, accountID)
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func (s *Service) insertRefreshToken(ctx context.Context, db execer, accountID stdid.UUID) (string, error) {
+	refreshRaw, refreshHash, expiresAt, err := s.tokens.IssueRefresh()
+	if err != nil {
+		return "", err
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO refresh_tokens (account_id, token_hash, expires_at)
+		VALUES ($1, $2, $3)
+	`, accountID, refreshHash, expiresAt); err != nil {
+		return "", fmt.Errorf("insert refresh token: %w", err)
+	}
+	return refreshRaw, nil
 }
 
 func (s *Service) Logout(ctx context.Context, refreshRaw string) error {
@@ -240,6 +331,9 @@ func (s *Service) UpdateProfile(ctx context.Context, accountID stdid.UUID, patch
 		if err := ValidateUsername(*patch.Username); err != nil {
 			return MeUser{}, err
 		}
+	}
+	if err := validateProfileLengths(patch); err != nil {
+		return MeUser{}, err
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -374,16 +468,9 @@ func (s *Service) issueSession(ctx context.Context, accountID stdid.UUID) (AuthR
 	if err != nil {
 		return AuthResponse{}, err
 	}
-	refreshRaw, refreshHash, expiresAt, err := s.tokens.IssueRefresh()
+	refreshRaw, err := s.insertRefreshToken(ctx, s.db, accountID)
 	if err != nil {
 		return AuthResponse{}, err
-	}
-	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO refresh_tokens (account_id, token_hash, expires_at)
-		VALUES ($1, $2, $3)
-	`, accountID, refreshHash, expiresAt)
-	if err != nil {
-		return AuthResponse{}, fmt.Errorf("insert refresh token: %w", err)
 	}
 	return AuthResponse{
 		User:         me,

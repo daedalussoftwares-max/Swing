@@ -11,6 +11,7 @@ import (
 
 	"serving/app/cmd/notifications"
 	"serving/app/cmd/push"
+	"serving/app/pkg/background"
 )
 
 func (s *Service) Send(
@@ -40,6 +41,11 @@ func (s *Service) Send(
 	if in.Media != nil {
 		if err := s.ensureMediaKeyOwned(ctx, accountID, chatID, in.Media.R2Key); err != nil {
 			return Message{}, err
+		}
+		if in.Media.ThumbKey != "" {
+			if err := s.ensureMediaKeyOwned(ctx, accountID, chatID, in.Media.ThumbKey); err != nil {
+				return Message{}, err
+			}
 		}
 	}
 	partnerID, err := s.partnerID(ctx, accountID, chatID)
@@ -181,7 +187,9 @@ func (s *Service) Send(
 	// enough). Push + in-app notification need extra DB round trips;
 	// never make the sender wait for them.
 	if deliver && (s.hub == nil || !s.hub.IsForeground(partnerID)) {
-		go s.notifyOffline(context.WithoutCancel(ctx), accountID, partnerID, chatID, msg)
+		background.Submit("chat.notify_offline", func(bg context.Context) {
+			s.notifyOffline(bg, accountID, partnerID, chatID, msg)
+		})
 	}
 
 	return msg, nil

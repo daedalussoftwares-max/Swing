@@ -26,5 +26,7 @@ func wrapAPI(handler http.Handler) http.Handler {
 		buildCORSMiddleware(),
 		requestid.Middleware,
 		accesslog.Middleware,
+		limitBody, // see limits.go
+		rateLimit,
 	)
 }

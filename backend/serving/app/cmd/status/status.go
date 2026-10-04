@@ -75,8 +75,65 @@ func (s *Service) ListMine(ctx context.Context, accountID stdid.UUID) ([]Item, e
 	return out, rows.Err()
 }
 
-func (s *Service) ListForAccount(ctx context.Context, accountID stdid.UUID) ([]Item, error) {
-	return s.ListMine(ctx, accountID)
+// ListForAccount returns ownerID's live stories as seen by viewerID. Only the
+// owner or a friend (with no block in either direction) may see them; anyone
+// else gets ErrNotFound so the endpoint doesn't reveal whether the account
+// exists. Permission check and fetch are one round trip: the CTE always
+// yields one row carrying the verdict, LEFT JOINed to the items.
+func (s *Service) ListForAccount(ctx context.Context, viewerID, ownerID stdid.UUID) ([]Item, error) {
+	if viewerID == ownerID {
+		return s.ListMine(ctx, ownerID)
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		WITH perm AS (
+			SELECT EXISTS (
+				SELECT 1 FROM friendships
+				WHERE account_a = LEAST($1::uuid, $2::uuid)
+				  AND account_b = GREATEST($1::uuid, $2::uuid)
+			) AND NOT EXISTS (
+				SELECT 1 FROM user_blocks
+				WHERE (blocker_id = $1 AND blocked_id = $2)
+				   OR (blocker_id = $2 AND blocked_id = $1)
+			) AS allowed
+		)
+		SELECT perm.allowed, si.id, si.account_id, si.kind, si.media_key,
+		       si.content_type, si.posted_at, si.expires_at
+		FROM perm
+		LEFT JOIN status_items si
+		       ON perm.allowed AND si.account_id = $2 AND si.expires_at > NOW()
+		ORDER BY si.posted_at ASC
+	`, viewerID, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	allowed := false
+	var out []Item
+	for rows.Next() {
+		var (
+			id, account         sql.Null[stdid.UUID]
+			kind, key, ct       sql.NullString
+			postedAt, expiresAt sql.NullTime
+		)
+		if err := rows.Scan(&allowed, &id, &account, &kind, &key, &ct, &postedAt, &expiresAt); err != nil {
+			return nil, err
+		}
+		if !id.Valid {
+			continue
+		}
+		out = append(out, Item{
+			ID: id.V, AccountID: account.V, Kind: kind.String, MediaKey: key.String,
+			ContentType: ct.String, PostedAt: postedAt.Time, ExpiresAt: expiresAt.Time,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if !allowed {
+		return nil, ErrNotFound
+	}
+	return out, nil
 }
 
 func (s *Service) Create(ctx context.Context, accountID stdid.UUID, in CreateInput) (Item, error) {

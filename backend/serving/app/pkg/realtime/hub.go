@@ -19,8 +19,9 @@ const sendBuffer = 256
 // That keeps HTTP handlers (send message, typing, read receipts) fast even
 // when the partner is on a flaky mobile network.
 type Hub struct {
-	mu    sync.RWMutex
-	conns map[stdid.UUID]map[*Conn]struct{}
+	mu      sync.RWMutex
+	conns   map[stdid.UUID]map[*Conn]struct{}
+	closing bool // set by CloseAll; new connections are closed immediately
 }
 
 func NewHub() *Hub {
@@ -96,6 +97,10 @@ func (h *Hub) Register(c *Conn) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.closing {
+		c.Close()
+		return
+	}
 	set := h.conns[c.UserID]
 	if set == nil {
 		set = make(map[*Conn]struct{})
@@ -123,6 +128,26 @@ func (h *Hub) Unregister(c *Conn) (lastConn bool) {
 		return true
 	}
 	return false
+}
+
+// CloseAll closes every live connection (server shutdown) and makes the
+// hub reject new ones. Each socket's writer sees Done() and closes the
+// WebSocket; its handler then unregisters as usual. Returns how many
+// connections were closed.
+func (h *Hub) CloseAll() int {
+	h.mu.Lock()
+	h.closing = true
+	var all []*Conn
+	for _, set := range h.conns {
+		for c := range set {
+			all = append(all, c)
+		}
+	}
+	h.mu.Unlock()
+	for _, c := range all {
+		c.Close()
+	}
+	return len(all)
 }
 
 // ConnCount returns how many live sockets the user has.

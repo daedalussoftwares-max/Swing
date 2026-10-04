@@ -1,7 +1,7 @@
 # Paper-plane matching & dispatch
 
 Code: `app/cmd/planes/` (`dispatcher.go`, `match.go`, `scoring.go`, `filters.go`),
-migration `lib/pg/migrate_planes_v3.go`.
+schema in `lib/pg/migrations/0001_baseline.sql` (dummy users: `0002_seed_dummy_users.sql`).
 
 ## Lifecycle
 

@@ -24,6 +24,9 @@ const (
 	fcmSendURLFmt  = "https://fcm.googleapis.com/v1/projects/%s/messages:send"
 	perSendTimeout = 8 * time.Second
 
+	// maxParallelSends caps concurrent FCM requests for one recipient.
+	maxParallelSends = 4
+
 	// AndroidChannelID must match the NotificationChannel created by the
 	// Android app at startup (MainApplication.kt).
 	AndroidChannelID = "messages"
@@ -82,7 +85,8 @@ func NewFCMFromFile(path, projectID string, db *sql.DB) (*FCM, error) {
 // ProjectID returns the Firebase project messages are sent through.
 func (f *FCM) ProjectID() string { return f.projectID }
 
-// Notify sends n to every registered device of recipientID concurrently.
+// Notify sends n to every registered device of recipientID concurrently
+// (bounded by maxParallelSends) and waits for all of them.
 // Tokens FCM reports as invalid are deleted. Errors are logged; the
 // returned error is non-nil only when every send failed.
 func (f *FCM) Notify(ctx context.Context, recipientID stdid.UUID, n Notification) error {
@@ -108,10 +112,16 @@ func (f *FCM) Notify(ctx context.Context, recipientID stdid.UUID, n Notification
 		mu     sync.Mutex
 		failed int
 	)
+	// At most maxParallelSends requests in flight per Notify; Notify itself
+	// runs on the bounded background pool, so total push concurrency is
+	// bounded too.
+	sem := make(chan struct{}, maxParallelSends)
 	for _, d := range devices {
 		wg.Add(1)
+		sem <- struct{}{}
 		go func(d DeviceToken) {
 			defer wg.Done()
+			defer func() { <-sem }()
 			defer func() {
 				if r := recover(); r != nil {
 					logx.Error("push: send panic", fmt.Errorf("%v", r))

@@ -34,6 +34,9 @@ type ServerYAML struct {
 	Port         string `yaml:"port"`
 	ReadTimeout  string `yaml:"read_timeout"`
 	WriteTimeout string `yaml:"write_timeout"`
+	// TrustProxy: honour X-Forwarded-For (right-most entry) for client IPs.
+	// Enable only when the API sits behind exactly one trusted reverse proxy.
+	TrustProxy bool `yaml:"trust_proxy"`
 }
 
 type DatabaseYAML struct {

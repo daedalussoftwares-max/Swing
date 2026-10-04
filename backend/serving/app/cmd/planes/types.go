@@ -104,6 +104,7 @@ type RecipientPreview struct {
 	Name      string     `json:"name"`
 	AvatarURL string     `json:"avatarUrl,omitempty"`
 	Location  string     `json:"location,omitempty"`
+	Age       *int       `json:"age,omitempty"`
 }
 
 type SenderPreview struct {

@@ -45,7 +45,7 @@ import { useColorScheme } from '@/hooks/use-color-scheme';
 import type { ProfilePatchBody } from '@/lib/api/auth-types';
 import { humanizeAuthError, useAuth } from '@/lib/auth-context';
 import { joinInterests, parseInterests } from '@/lib/interests';
-import { COUNTRIES } from '@/lib/countries';
+import { COUNTRIES, withFlag } from '@/lib/countries';
 import { authUserToLocalPatch } from '@/lib/profile-from-auth';
 import { isUsernameAvailable } from '@/lib/usernames';
 import { type LocalUser, useUserSettings } from '@/lib/user-settings-context';
@@ -336,7 +336,8 @@ export default function EditProfileScreen() {
               onChangeText={(v) => {
                 // Single-line: strip newlines so paste / IME suggestions can't
                 // sneak a line-break in and grow the row.
-                set('bio', v.replace(/\r?\n/g, ' '));
+                // Server caps bio at 500 characters.
+                set('bio', v.replace(/\r?\n/g, ' ').slice(0, 500));
               }}
               placeholder="A short vibe for your profile"
             />
@@ -732,7 +733,7 @@ function CountryPicker({
                       ]}
                     >
                       <ThemedText style={styles.countryName}>
-                        {item}
+                        {withFlag(item)}
                       </ThemedText>
                       {active ? (
                         <Ionicons

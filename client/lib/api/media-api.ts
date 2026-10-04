@@ -1,4 +1,5 @@
-import { ApiError, apiFetch } from '@/lib/api/client';
+import { authedFetch } from '@/lib/api/authed-fetch';
+import { ApiError } from '@/lib/api/client';
 
 export type UploadSlot = {
   uploadUrl: string;
@@ -20,46 +21,38 @@ export type StatusItemResponse = {
 };
 
 export async function requestAvatarUploadUrl(
-  accessToken: string,
   contentType = 'image/jpeg',
 ): Promise<UploadSlot> {
-  return apiFetch<UploadSlot>('/v1/me/avatar/upload-url', {
+  return authedFetch<UploadSlot>('/v1/me/avatar/upload-url', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${accessToken}` },
     body: JSON.stringify({ contentType }),
   });
 }
 
 export async function requestStatusUploadUrl(
-  accessToken: string,
   contentType: string,
 ): Promise<UploadSlot> {
-  return apiFetch<UploadSlot>('/v1/me/status/upload-url', {
+  return authedFetch<UploadSlot>('/v1/me/status/upload-url', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${accessToken}` },
     body: JSON.stringify({ contentType }),
   });
 }
 
 export async function requestChatUploadUrl(
-  accessToken: string,
   chatId: string,
   contentType: string,
 ): Promise<UploadSlot> {
-  return apiFetch<UploadSlot>('/v1/media/chat/upload-url', {
+  return authedFetch<UploadSlot>('/v1/media/chat/upload-url', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${accessToken}` },
     body: JSON.stringify({ chatId, contentType }),
   });
 }
 
 export async function requestMediaReadUrl(
-  accessToken: string,
   mediaKey: string,
 ): Promise<string> {
-  const res = await apiFetch<{ viewUrl: string }>('/v1/media/read-url', {
+  const res = await authedFetch<{ viewUrl: string }>('/v1/media/read-url', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${accessToken}` },
     body: JSON.stringify({ mediaKey }),
   });
   return res.viewUrl;
@@ -74,7 +67,19 @@ export async function putLocalFile(
   if (!fileRes.ok) {
     throw new ApiError('UPLOAD_FAILED', 'Could not read the selected file.');
   }
-  const blob = await fileRes.blob();
+  const fileBlob = await fileRes.blob();
+  if (fileBlob.size === 0) {
+    throw new ApiError('UPLOAD_FAILED', 'The file is empty. Try again.');
+  }
+  // Android's networking layer sends the BLOB's MIME type (guessed from the
+  // file extension, e.g. ".mp4" → video/mp4 for voice notes) instead of our
+  // Content-Type header. The presigned URL signs Content-Type, so a mismatch
+  // makes R2 reject the PUT — re-label the same bytes (no copy) with the
+  // signed type.
+  const blob =
+    fileBlob.type === contentType
+      ? fileBlob
+      : fileBlob.slice(0, fileBlob.size, contentType);
 
   let putRes: Response;
   try {
@@ -92,43 +97,36 @@ export async function putLocalFile(
 }
 
 export async function listMyStatus(
-  accessToken: string,
 ): Promise<StatusItemResponse[]> {
-  const res = await apiFetch<{ items: StatusItemResponse[] }>('/v1/me/status', {
-    headers: { Authorization: `Bearer ${accessToken}` },
+  const res = await authedFetch<{ items: StatusItemResponse[] }>('/v1/me/status', {
   });
   return res.items ?? [];
 }
 
 export async function createStatusItem(
-  accessToken: string,
   body: { mediaKey: string; contentType: string; kind: 'image' | 'video' },
 ): Promise<StatusItemResponse> {
-  const res = await apiFetch<{ item: StatusItemResponse }>('/v1/me/status', {
+  const res = await authedFetch<{ item: StatusItemResponse }>('/v1/me/status', {
     method: 'POST',
-    headers: { Authorization: `Bearer ${accessToken}` },
     body: JSON.stringify(body),
   });
   return res.item;
 }
 
 export async function deleteStatusItem(
-  accessToken: string,
   id: string,
 ): Promise<void> {
-  await apiFetch<void>(`/v1/me/status/${encodeURIComponent(id)}`, {
+  await authedFetch<void>(`/v1/me/status/${encodeURIComponent(id)}`, {
     method: 'DELETE',
-    headers: { Authorization: `Bearer ${accessToken}` },
   });
 }
 
 export async function listAccountStatus(
-  accessToken: string,
   accountId: string,
 ): Promise<StatusItemResponse[]> {
-  const res = await apiFetch<{ items: StatusItemResponse[] }>(
+  const res = await authedFetch<{ items: StatusItemResponse[] }>(
     `/v1/status/${encodeURIComponent(accountId)}`,
-    { headers: { Authorization: `Bearer ${accessToken}` } },
+    {},
   );
   return res.items ?? [];
 }

@@ -187,13 +187,20 @@ func (s *Service) Delete(
 			return ErrDeleteNotAllowed
 		}
 		now := time.Now().UTC()
-		_, err = s.db.ExecContext(ctx, `
-			UPDATE chat_messages
-			SET deleted_at = $3, body = NULL
-			WHERE id = $1 AND chat_id = $2
-		`, messageID, chatID, now)
+		// Unsend removes the media too (row and stored file), not just text.
+		var oldMedia []byte
+		err = s.db.QueryRowContext(ctx, `
+			UPDATE chat_messages m
+			SET deleted_at = $3, body = NULL, media = NULL
+			FROM (SELECT id, media FROM chat_messages WHERE id = $1 AND chat_id = $2 FOR UPDATE) old
+			WHERE m.id = old.id
+			RETURNING old.media
+		`, messageID, chatID, now).Scan(&oldMedia)
 		if err != nil {
 			return err
+		}
+		if meta, perr := parseMediaJSON(oldMedia); perr == nil && meta != nil {
+			s.deleteMediaLater(meta, 0)
 		}
 		if s.hub != nil {
 			payload := map[string]any{

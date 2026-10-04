@@ -51,7 +51,7 @@ import { Colors, Radii, Spacing } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useTabFocusFade } from '@/hooks/use-tab-focus-fade';
 import { humanizeAuthError, useAuth } from '@/lib/auth-context';
-import { useChats } from '@/lib/chats-context';
+import { useChatList } from '@/lib/chats-context';
 import { joinInterests, parseInterests } from '@/lib/interests';
 import { authUserToLocalPatch } from '@/lib/profile-from-auth';
 import { useSentPlanes } from '@/lib/sent-planes-context';
@@ -72,7 +72,7 @@ export default function ProfileScreen() {
     () => parseInterests(user.interests),
     [user.interests],
   );
-  const { chats } = useChats();
+  const chats = useChatList();
   const { sentPlanes, total: planesSentTotal } = useSentPlanes();
 
   // Friends are accepted-chat partners that aren't blocked.

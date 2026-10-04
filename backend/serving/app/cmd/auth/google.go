@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -12,7 +13,7 @@ import (
 )
 
 var (
-	ErrGoogleTokenInvalid = errors.New("google token invalid")
+	ErrGoogleTokenInvalid  = errors.New("google token invalid")
 	ErrGoogleNotConfigured = errors.New("google auth not configured")
 )
 
@@ -21,6 +22,7 @@ type googleTokenInfo struct {
 	Email         string `json:"email"`
 	EmailVerified string `json:"email_verified"`
 	Aud           string `json:"aud"`
+	Iss           string `json:"iss"`
 }
 
 // VerifyGoogleIDToken checks a Google ID token via Google's tokeninfo endpoint.
@@ -52,10 +54,14 @@ func VerifyGoogleIDToken(ctx context.Context, allowedClientIDs []string, idToken
 	}
 
 	var info googleTokenInfo
-	if err := json.NewDecoder(res.Body).Decode(&info); err != nil {
+	if err := json.NewDecoder(io.LimitReader(res.Body, 64<<10)).Decode(&info); err != nil {
 		return googleTokenInfo{}, ErrGoogleTokenInvalid
 	}
+	// tokeninfo validates signature and expiry; audience and issuer are ours to check.
 	if info.Sub == "" || !googleAudienceAllowed(info.Aud, allowedClientIDs) {
+		return googleTokenInfo{}, ErrGoogleTokenInvalid
+	}
+	if info.Iss != "accounts.google.com" && info.Iss != "https://accounts.google.com" {
 		return googleTokenInfo{}, ErrGoogleTokenInvalid
 	}
 	if info.EmailVerified != "true" && info.EmailVerified != "1" {

@@ -31,11 +31,16 @@ func Start() {
 	}()
 }
 
+// ShutDown stops accepting new connections and waits (up to the server
+// write timeout) for in-flight HTTP requests. Hijacked WebSocket
+// connections are not tracked by http.Server; common.Shutdown closes them.
 func ShutDown() {
 	if srv == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), config.GetServerWriteTimeout())
 	defer cancel()
-	_ = srv.Shutdown(ctx)
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("http shutdown: %v", err)
+	}
 }

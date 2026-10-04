@@ -18,7 +18,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Avatar } from '@/components/avatar';
 import { ThemedText } from '@/components/themed-text';
-import { useChats } from '@/lib/chats-context';
+import { useChatList } from '@/lib/chats-context';
 import type { Sender } from '@/types/plane';
 
 const STORY_DURATION_MS = 5000;
@@ -32,7 +32,7 @@ export default function StoryViewerScreen() {
 function StoryViewerContent({ userId }: { userId: string }) {
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { chats } = useChats();
+  const chats = useChatList();
 
   const partner = useMemo<Sender | null>(() => {
     const fromChat = chats.find((ch) => ch.partner.id === userId)?.partner;

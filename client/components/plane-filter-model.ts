@@ -5,7 +5,7 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-import { COUNTRIES } from '@/lib/countries';
+import { COUNTRIES, withFlag } from '@/lib/countries';
 import type { SentPlane } from '@/types/sent-plane';
 
 export type GenderOption = 'any' | 'female' | 'male' | 'non-binary';
@@ -86,7 +86,7 @@ export function summarizeFilters(f: PlaneFilterState): string {
   const parts = [who];
   if (f.age !== 'any') parts.push(AGE_OPTIONS.find((o) => o.value === f.age)!.label);
   if (f.distance !== 'anywhere') parts.push(`within ${f.distance} km`);
-  if (f.country) parts.push(`in ${f.country}`);
+  if (f.country) parts.push(`in ${withFlag(f.country)}`);
   if (f.distance === 'anywhere' && !f.country) parts.push('anywhere');
   return parts.join(' · ');
 }

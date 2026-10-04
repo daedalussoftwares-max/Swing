@@ -6,7 +6,13 @@
 
 import * as authApi from '@/lib/api/auth-api';
 import { ApiError } from '@/lib/api/client';
-import { clearTokens, readTokens, writeTokens } from '@/lib/api/token-storage';
+import type { AuthSessionResponse } from '@/lib/api/auth-types';
+import {
+  clearTokens,
+  readTokens,
+  tokenGeneration,
+  writeTokens,
+} from '@/lib/api/token-storage';
 
 /** Refresh this long before `exp` so in-flight requests don't race expiry. */
 const EXPIRY_SKEW_MS = 60_000;
@@ -55,30 +61,37 @@ function jwtExpiryMs(token: string): number | null {
   }
 }
 
-let inflight: Promise<string | null> | null = null;
+let inflight: Promise<AuthSessionResponse | null> | null = null;
 
 /**
- * Exchanges the refresh token for a new pair. Single-flight: refresh
- * tokens rotate, so two concurrent refreshes would invalidate each other.
+ * Exchanges the refresh token for a new session. Single-flight: refresh
+ * tokens rotate, so concurrent refreshes must share one request.
+ *
+ * Resolves `null` ONLY when the server says the session is over
+ * (INVALID_TOKEN) — tokens are cleared and listeners notified. Network /
+ * server errors THROW instead: a flaky connection must never log anyone out.
  */
-export function refreshAccessToken(): Promise<string | null> {
+export function refreshSession(): Promise<AuthSessionResponse | null> {
   if (inflight) return inflight;
   inflight = (async () => {
+    const gen = tokenGeneration();
     try {
       const { refreshToken } = await readTokens();
       if (!refreshToken) return null;
       const session = await authApi.refresh(refreshToken);
+      // Signed out while we were waiting? Don't bring the tokens back.
+      if (gen !== tokenGeneration()) return null;
       await writeTokens(session.accessToken, session.refreshToken);
-      return session.accessToken;
+      return session;
     } catch (e) {
-      if (
-        e instanceof ApiError &&
-        (e.code === 'INVALID_TOKEN' || e.httpStatus === 401)
-      ) {
-        await clearTokens();
-        for (const fn of expiredListeners) fn();
+      if (e instanceof ApiError && e.code === 'INVALID_TOKEN') {
+        if (gen === tokenGeneration()) {
+          await clearTokens();
+          for (const fn of expiredListeners) fn();
+        }
+        return null;
       }
-      return null;
+      throw e;
     } finally {
       inflight = null;
     }
@@ -86,13 +99,27 @@ export function refreshAccessToken(): Promise<string | null> {
   return inflight;
 }
 
-/** Returns an access token that is valid for at least another minute. */
+/** New access token; `null` when the session has ended. Throws on network errors. */
+export async function refreshAccessToken(): Promise<string | null> {
+  const session = await refreshSession();
+  return session?.accessToken ?? null;
+}
+
+/**
+ * Returns an access token that is valid for at least another minute.
+ * `null` = not signed in. If a needed refresh fails transiently, the old
+ * token is returned while it is still technically valid, otherwise the
+ * network error is thrown (the request fails; the session survives).
+ */
 export async function getFreshAccessToken(): Promise<string | null> {
   const { accessToken } = await readTokens();
   if (!accessToken) return null;
   const exp = jwtExpiryMs(accessToken);
-  if (exp != null && exp - Date.now() < EXPIRY_SKEW_MS) {
-    return (await refreshAccessToken()) ?? null;
+  if (exp == null || exp - Date.now() >= EXPIRY_SKEW_MS) return accessToken;
+  try {
+    return await refreshAccessToken();
+  } catch (e) {
+    if (exp > Date.now()) return accessToken;
+    throw e;
   }
-  return accessToken;
 }

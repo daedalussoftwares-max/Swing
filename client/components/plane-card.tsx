@@ -42,6 +42,7 @@ import { ThemedText } from '@/components/themed-text';
 import { Colors, Radii, Spacing } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import type { Plane } from '@/types/plane';
+import { withFlag } from '@/lib/countries';
 
 type Props = {
   plane: Plane;
@@ -166,7 +167,7 @@ export const PlaneCard = memo(function PlaneCard({
             </ThemedText>
             <ThemedText style={[styles.distance, { color: c.textMuted }]}>
               {plane.sender.city && plane.sender.country
-                ? `${plane.sender.city}, ${plane.sender.country}`
+                ? `${plane.sender.city}, ${withFlag(plane.sender.country)}`
                 : plane.sender.distanceKm > 0
                   ? `${plane.sender.distanceKm} km away`
                   : 'On Swing'}
