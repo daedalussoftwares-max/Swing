@@ -20,6 +20,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/internal/s3shared v1.19.28 // indirect
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.103.2 // indirect
 	github.com/aws/smithy-go v1.27.1 // indirect
+	github.com/coder/websocket v1.8.13 // indirect
 	github.com/lib/pq v1.10.9 // indirect
 )
 

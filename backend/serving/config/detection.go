@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -100,6 +101,24 @@ func applyEnvOverrides(cfg *Configuration) {
 	if v := os.Getenv(envR2PublicBaseURL); v != "" {
 		cfg.R2.PublicBaseURL = v
 	}
+	if v, ok := os.LookupEnv(envDebugHTTP); ok {
+		cfg.Logging.DebugHTTP = parseTruthy(v)
+	}
+	if v := os.Getenv(envFCMServiceAccountFile); v != "" {
+		cfg.Push.FCMServiceAccountFile = v
+	}
+	if v := os.Getenv(envFCMProjectID); v != "" {
+		cfg.Push.FCMProjectID = v
+	}
+}
+
+func parseTruthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func mergeConfiguration(base, overlay *Configuration) {
@@ -147,5 +166,14 @@ func mergeConfiguration(base, overlay *Configuration) {
 	}
 	if overlay.R2.PublicBaseURL != "" {
 		base.R2.PublicBaseURL = overlay.R2.PublicBaseURL
+	}
+	if overlay.Logging.DebugHTTP {
+		base.Logging.DebugHTTP = true
+	}
+	if overlay.Push.FCMServiceAccountFile != "" {
+		base.Push.FCMServiceAccountFile = overlay.Push.FCMServiceAccountFile
+	}
+	if overlay.Push.FCMProjectID != "" {
+		base.Push.FCMProjectID = overlay.Push.FCMProjectID
 	}
 }

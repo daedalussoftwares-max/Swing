@@ -1,0 +1,4 @@
+# Copy to local.properties (gitignored) after installing Android Studio.
+# Android Studio → Settings → Languages & Frameworks → Android SDK → "Android SDK location"
+#
+# sdk.dir=/Users/YOUR_USER/Library/Android/sdk

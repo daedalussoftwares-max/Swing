@@ -48,7 +48,7 @@ import { Colors, Radii, Spacing } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { deleteStatusItem, listMyStatus } from '@/lib/api/media-api';
 import { humanizeAuthError, useAuth } from '@/lib/auth-context';
-import { readTokens } from '@/lib/api/token-storage';
+import { getFreshAccessToken } from '@/lib/api/session';
 import { apiStatusToLocal } from '@/lib/status-from-api';
 import { uploadStatusDraft } from '@/lib/upload-media';
 import {
@@ -82,7 +82,7 @@ export default function StatusScreen() {
       if (auth.status !== 'signed-in') return;
       (async () => {
         try {
-          const { accessToken } = await readTokens();
+          const accessToken = await getFreshAccessToken();
           if (!accessToken) return;
           const items = await listMyStatus(accessToken);
           updateUser({ statusItems: items.map(apiStatusToLocal) });
@@ -196,7 +196,7 @@ export default function StatusScreen() {
         const target = posted[activeIndex];
         if (target?.id && auth.status === 'signed-in') {
           try {
-            const { accessToken } = await readTokens();
+            const accessToken = await getFreshAccessToken();
             if (accessToken) {
               await deleteStatusItem(accessToken, target.id);
             }
@@ -260,7 +260,7 @@ export default function StatusScreen() {
 
     setUploading(true);
     try {
-      const { accessToken } = await readTokens();
+      const accessToken = await getFreshAccessToken();
       if (!accessToken) throw new Error('no token');
       const uploaded: StatusItem[] = [];
       for (const d of drafts) {

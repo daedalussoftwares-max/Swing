@@ -201,6 +201,59 @@ func migratePlaneEngineV2(ctx context.Context, db *sql.DB) error {
 	return seedDummyUsers(ctx, db)
 }
 
+func migrateChatMessaging(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS chat_messages (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			chat_id UUID NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+			sender_account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			body TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			CHECK (char_length(body) > 0 AND char_length(body) <= 4000)
+		)
+	`); err != nil {
+		return fmt.Errorf("chat_messages table: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_chat_messages_chat_created
+			ON chat_messages(chat_id, created_at DESC)
+	`); err != nil {
+		return fmt.Errorf("chat_messages index: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS chat_read_state (
+			chat_id UUID NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			last_read_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (chat_id, account_id)
+		)
+	`); err != nil {
+		return fmt.Errorf("chat_read_state table: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS notifications (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+			kind TEXT NOT NULL,
+			title TEXT NOT NULL,
+			body TEXT,
+			from_name TEXT,
+			deep_link TEXT,
+			read_at TIMESTAMPTZ,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)
+	`); err != nil {
+		return fmt.Errorf("notifications table: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_notifications_account_created
+			ON notifications(account_id, created_at DESC)
+	`); err != nil {
+		return fmt.Errorf("notifications index: %w", err)
+	}
+	return nil
+}
+
 func seedDummyUsers(ctx context.Context, db *sql.DB) error {
 	type dummy struct {
 		id, googleSub, email, username, name, gender, country, city, interests, bio string

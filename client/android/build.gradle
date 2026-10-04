@@ -14,10 +14,15 @@ buildscript {
     mavenCentral()
   }
   dependencies {
-    classpath("com.android.tools.build:gradle")
-    classpath("com.facebook.react:react-native-gradle-plugin")
-    classpath("org.jetbrains.kotlin:kotlin-gradle-plugin")
+    // Versions aligned with @react-native/gradle-plugin/gradle/libs.versions.toml
+    classpath("com.android.tools.build:gradle:8.11.0")
+    classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlinVersion")
+    // Firebase (push). Only applied by app/build.gradle when google-services.json exists.
+    classpath("com.google.gms:google-services:4.5.0")
   }
 }
 
-apply plugin: "com.facebook.react.rootproject"
+// Resolved from includeBuild in settings.gradle (not Maven).
+plugins {
+  id("com.facebook.react.rootproject")
+}

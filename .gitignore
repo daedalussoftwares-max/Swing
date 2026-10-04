@@ -69,3 +69,6 @@ Thumbs.db
 **/.cursor/
 **/.aider*
 **/.codex/
+
+# Local notes for later (not committed)
+LATER.md

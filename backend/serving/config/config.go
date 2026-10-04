@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"time"
 )
@@ -20,6 +21,8 @@ type Configuration struct {
 	Auth     AuthYAML     `yaml:"auth"`
 	R2       R2YAML       `yaml:"r2"`
 	CORS     CORSYAML     `yaml:"cors"`
+	Logging  LoggingYAML  `yaml:"logging"`
+	Push     PushYAML     `yaml:"push"`
 
 	readTimeout     time.Duration
 	writeTimeout    time.Duration
@@ -82,8 +85,24 @@ func (r R2YAML) Enabled() bool {
 		strings.TrimSpace(r.PublicBaseURL) != ""
 }
 
+// PushYAML configures mobile push (Firebase Cloud Messaging HTTP v1).
+// Push is disabled when fcm_service_account_file is empty.
+type PushYAML struct {
+	// Path to a Google service-account JSON with the
+	// "Firebase Cloud Messaging API Admin" role. Relative paths resolve
+	// against the server's working directory (backend/serving).
+	FCMServiceAccountFile string `yaml:"fcm_service_account_file"`
+	// Optional; defaults to project_id from the service-account JSON.
+	FCMProjectID string `yaml:"fcm_project_id"`
+}
+
 type CORSYAML struct {
 	AllowedOrigins []string `yaml:"allowed_origins"`
+}
+
+type LoggingYAML struct {
+	// Log every request at info (path, timing). Off by default; enable for local debugging.
+	DebugHTTP bool `yaml:"debug_http"`
 }
 
 func (c *Configuration) validate() error {
@@ -172,4 +191,20 @@ func IsDev() bool {
 
 func GetR2() R2YAML {
 	return selected.R2
+}
+
+// DebugHTTP enables verbose per-request access logs (see logging.debug_http or SWING_DEBUG_HTTP).
+func DebugHTTP() bool {
+	if selected.Logging.DebugHTTP {
+		return true
+	}
+	if v, ok := os.LookupEnv(envDebugHTTP); ok {
+		return parseTruthy(v)
+	}
+	return false
+}
+
+// GetPush returns push notification settings (see push.* or FCM_SERVICE_ACCOUNT_FILE).
+func GetPush() PushYAML {
+	return selected.Push
 }

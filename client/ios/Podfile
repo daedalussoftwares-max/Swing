@@ -26,14 +26,33 @@ def patch_fmt_for_xcode26(installer)
   File.write(fmt_base, patched)
 end
 
+# React Native Firebase (push via FCM). Firebase pods come from CocoaPods
+# (not SPM). We deliberately do NOT use `use_frameworks!`: with pnpm's
+# symlinked node_modules it breaks React-debug header mapping
+# ('react/debug/react_native_assert.h' not found). Instead the Firebase Swift
+# pods get modular headers (see target block below).
+$RNFirebaseDisableSPM = true
+
 linkage = ENV['USE_FRAMEWORKS']
 if linkage != nil
   Pod::UI.puts "Configuring Pod with #{linkage}ally linked Frameworks".green
+  $RNFirebaseAsStaticFramework = true if linkage.to_s == 'static'
   use_frameworks! :linkage => linkage.to_sym
 end
 
 target 'swing' do
   config = use_native_modules!
+
+  # Firebase Swift pods need module maps when linked as static libraries.
+  if linkage == nil
+    pod 'FirebaseCore', :modular_headers => true
+    pod 'FirebaseCoreInternal', :modular_headers => true
+    pod 'FirebaseCoreExtension', :modular_headers => true
+    pod 'FirebaseInstallations', :modular_headers => true
+    pod 'GoogleUtilities', :modular_headers => true
+    pod 'GoogleDataTransport', :modular_headers => true
+    pod 'nanopb', :modular_headers => true
+  end
 
   use_react_native!(
     :path => config[:reactNativePath],
@@ -49,5 +68,11 @@ target 'swing' do
       :mac_catalyst_enabled => false,
     )
     patch_fmt_for_xcode26(installer)
+
+    installer.pods_project.targets.each do |target|
+      target.build_configurations.each do |config|
+        config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
+      end
+    end
   end
 end

@@ -8,13 +8,34 @@
  *   2. Avatar circle → opens the sender's profile screen
  *   3. The rest of the card body → opens the full plane-detail screen
  *
+ * Accept / Reject play a short fly-off on the UI thread (accept: the
+ * card lifts up and away like a launched plane; reject: it tips over and
+ * drops) and only THEN call the handler, so the optimistic removal in
+ * the inbox context never cuts the animation short.
+ *
  * The message text on the card is intentionally TRIMMED with
  * `numberOfLines={3}` so the card stays consistent height; the full text
  * is visible on the detail screen.
  */
 
+import * as Haptics from '@/lib/native/haptics';
 import { Ionicons } from '@/lib/native/vector-icons';
+import { memo, useCallback, useEffect } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
+import Animated, {
+  cancelAnimation,
+  Easing,
+  interpolate,
+  runOnJS,
+  type SharedValue,
+  useAnimatedStyle,
+  useSharedValue,
+  withDelay,
+  withRepeat,
+  withSequence,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
 
 import { SwipeSafePressable } from '@/components/swipe-safe-pressable';
 import { ThemedText } from '@/components/themed-text';
@@ -30,7 +51,7 @@ type Props = {
   onReject?: (plane: Plane) => void;
 };
 
-export function PlaneCard({
+export const PlaneCard = memo(function PlaneCard({
   plane,
   onOpen,
   onOpenProfile,
@@ -42,14 +63,83 @@ export function PlaneCard({
 
   const avatarInitial = plane.sender.name.charAt(0).toUpperCase();
 
+  // 0 = resting, 1 = accepted (flies up-right), -1 = rejected (drops left).
+  const fly = useSharedValue(0);
+  const busy = useSharedValue(false);
+  const bob = useSharedValue(0);
+
+  useEffect(() => {
+    bob.value = withRepeat(
+      withTiming(1, { duration: 1800, easing: Easing.inOut(Easing.sin) }),
+      -1,
+      true,
+    );
+    return () => cancelAnimation(bob);
+  }, [bob]);
+
+  const cardStyle = useAnimatedStyle(() => {
+    const a = fly.value > 0 ? fly.value : 0;
+    const r = fly.value < 0 ? -fly.value : 0;
+    return {
+      opacity: 1 - interpolate(a + r, [0, 0.6, 1], [0, 0.2, 1]),
+      transform: [
+        { translateX: a * 140 - r * 320 },
+        { translateY: -a * 520 + r * 120 },
+        { rotate: `${a * 14 - r * 18}deg` },
+        { scale: 1 - a * 0.25 - r * 0.08 },
+      ],
+    };
+  });
+
+  const iconStyle = useAnimatedStyle(() => ({
+    transform: [
+      { translateY: -6 * bob.value },
+      { rotate: `${-4 + 8 * bob.value}deg` },
+    ],
+  }));
+
+  const finish = useCallback(
+    (kind: 'accept' | 'reject') => {
+      if (kind === 'accept') onAccept?.(plane);
+      else onReject?.(plane);
+      // If the plane is still here later (e.g. the request failed and was
+      // rolled back without a remount), settle the card back in place.
+      fly.value = withDelay(1500, withSpring(0, { damping: 14 }));
+      busy.value = false;
+    },
+    [onAccept, onReject, plane, fly, busy],
+  );
+
+  const handleAccept = useCallback(() => {
+    if (busy.value) return;
+    busy.value = true;
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    fly.value = withSequence(
+      withTiming(-0.03, { duration: 90 }),
+      withTiming(1, { duration: 380, easing: Easing.in(Easing.cubic) }, (done) => {
+        if (done) runOnJS(finish)('accept');
+      }),
+    );
+  }, [busy, fly, finish]);
+
+  const handleReject = useCallback(() => {
+    if (busy.value) return;
+    busy.value = true;
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    fly.value = withTiming(-1, { duration: 340, easing: Easing.in(Easing.quad) }, (done) => {
+      if (done) runOnJS(finish)('reject');
+    });
+  }, [busy, fly, finish]);
+
   return (
-    <View
+    <Animated.View
       style={[
         styles.card,
         {
           backgroundColor: c.surface,
           borderColor: c.border,
         },
+        cardStyle,
       ]}
     >
       <SwipeSafePressable
@@ -75,24 +165,33 @@ export function PlaneCard({
               {plane.sender.name}
             </ThemedText>
             <ThemedText style={[styles.distance, { color: c.textMuted }]}>
-              {plane.sender.distanceKm} km away
+              {plane.sender.city && plane.sender.country
+                ? `${plane.sender.city}, ${plane.sender.country}`
+                : plane.sender.distanceKm > 0
+                  ? `${plane.sender.distanceKm} km away`
+                  : 'On Swing'}
             </ThemedText>
           </View>
         </View>
 
         {/* Corner pill — gender flag (M / F / NB). Falls back to the
-            age string only when no gender has been set, so older mock
-            entries don't break. */}
-        <View style={[styles.agePill, { backgroundColor: c.surfaceAlt }]}>
-          <ThemedText style={[styles.ageText, { color: c.textMuted }]}>
-            {plane.sender.gender ?? plane.sender.ageBadge}
-          </ThemedText>
-        </View>
+            age string only when no gender has been set. Hidden when
+            there's nothing to show. */}
+        {plane.sender.gender || plane.sender.ageBadge ? (
+          <View style={[styles.agePill, { backgroundColor: c.surfaceAlt }]}>
+            <ThemedText style={[styles.ageText, { color: c.textMuted }]}>
+              {plane.sender.gender ?? plane.sender.ageBadge}
+            </ThemedText>
+          </View>
+        ) : null}
       </View>
 
-      {/* Plane illustration (placeholder icon — swap with custom artwork later) */}
+      {/* Gently bobbing plane */}
       <View style={styles.illustration}>
-        <Ionicons name="paper-plane-outline" size={88} color={c.tint} />
+        <View style={[styles.illustrationGlow, { backgroundColor: c.tintMuted }]} />
+        <Animated.View style={iconStyle}>
+          <Ionicons name="paper-plane-outline" size={80} color={c.tint} />
+        </Animated.View>
       </View>
 
       {/* Message — trimmed; tap card to read full. */}
@@ -117,35 +216,22 @@ export function PlaneCard({
       {/* Action buttons — outside the card press target so Accept/Reject
           don't also open the plane-detail screen. */}
       <View style={styles.actions}>
-        <Pressable
-          onPress={() => onReject?.(plane)}
-          style={({ pressed }) => [
-            styles.actionButton,
-            {
-              backgroundColor: c.surface,
-              borderColor: c.border,
-              opacity: pressed ? 0.7 : 1,
-            },
-          ]}
-          hitSlop={8}
-        >
-          <Ionicons name="close" size={28} color={c.danger} />
-        </Pressable>
-
-        <Pressable
-          onPress={() => onAccept?.(plane)}
-          style={({ pressed }) => [
-            styles.actionButton,
-            {
-              backgroundColor: c.surface,
-              borderColor: c.border,
-              opacity: pressed ? 0.7 : 1,
-            },
-          ]}
-          hitSlop={8}
-        >
-          <Ionicons name="checkmark" size={28} color={c.success} />
-        </Pressable>
+        <ActionButton
+          icon="close"
+          color={c.danger}
+          label="Pass"
+          onPress={handleReject}
+          bg={c.surface}
+          border={c.border}
+        />
+        <ActionButton
+          icon="checkmark"
+          color={c.success}
+          label="Accept"
+          onPress={handleAccept}
+          bg={c.surface}
+          border={c.border}
+        />
       </View>
 
       {/* Paper-fold corner accent (subtle visual nod to the design) */}
@@ -155,8 +241,51 @@ export function PlaneCard({
           { borderColor: c.border, backgroundColor: c.surfaceAlt },
         ]}
       />
-    </View>
+    </Animated.View>
   );
+});
+
+function ActionButton({
+  icon,
+  color,
+  label,
+  onPress,
+  bg,
+  border,
+}: {
+  icon: keyof typeof Ionicons.glyphMap;
+  color: string;
+  label: string;
+  onPress: () => void;
+  bg: string;
+  border: string;
+}) {
+  const press = useSharedValue(1);
+  const style = usePressStyle(press);
+  return (
+    <Pressable
+      onPress={onPress}
+      onPressIn={() => {
+        press.value = withSpring(0.86, { damping: 14, stiffness: 420 });
+      }}
+      onPressOut={() => {
+        press.value = withSpring(1, { damping: 9, stiffness: 260 });
+      }}
+      hitSlop={8}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+    >
+      <Animated.View
+        style={[styles.actionButton, { backgroundColor: bg, borderColor: border }, style]}
+      >
+        <Ionicons name={icon} size={28} color={color} />
+      </Animated.View>
+    </Pressable>
+  );
+}
+
+function usePressStyle(press: SharedValue<number>) {
+  return useAnimatedStyle(() => ({ transform: [{ scale: press.value }] }));
 }
 
 const styles = StyleSheet.create({
@@ -225,6 +354,14 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginTop: Spacing.lg,
     marginBottom: Spacing.md,
+    height: 110,
+  },
+  illustrationGlow: {
+    position: 'absolute',
+    width: 110,
+    height: 110,
+    borderRadius: 55,
+    opacity: 0.6,
   },
   message: {
     fontSize: 17,

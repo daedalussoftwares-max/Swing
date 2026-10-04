@@ -24,11 +24,11 @@ type googleBody struct {
 func Register(w http.ResponseWriter, r *http.Request) {
 	var body emailPasswordBody
 	if err := httpx.DecodeJSON(r, &body); err != nil {
-		httpx.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body.")
+		httpx.Error(w, r, http.StatusBadRequest, "INVALID_BODY", "Invalid request body.")
 		return
 	}
 	if msg := validateCredentials(body.Email, body.Password); msg != "" {
-		httpx.Error(w, http.StatusBadRequest, "INVALID_INPUT", msg)
+		httpx.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", msg)
 		return
 	}
 	resp, err := common.Auth.Register(r.Context(), body.Email, body.Password)
@@ -42,11 +42,11 @@ func Register(w http.ResponseWriter, r *http.Request) {
 func Login(w http.ResponseWriter, r *http.Request) {
 	var body emailPasswordBody
 	if err := httpx.DecodeJSON(r, &body); err != nil {
-		httpx.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body.")
+		httpx.Error(w, r, http.StatusBadRequest, "INVALID_BODY", "Invalid request body.")
 		return
 	}
 	if msg := validateCredentials(body.Email, body.Password); msg != "" {
-		httpx.Error(w, http.StatusBadRequest, "INVALID_INPUT", msg)
+		httpx.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", msg)
 		return
 	}
 	resp, err := common.Auth.Login(r.Context(), body.Email, body.Password)
@@ -60,7 +60,7 @@ func Login(w http.ResponseWriter, r *http.Request) {
 func LoginGoogle(w http.ResponseWriter, r *http.Request) {
 	var body googleBody
 	if err := httpx.DecodeJSON(r, &body); err != nil || strings.TrimSpace(body.IDToken) == "" {
-		httpx.Error(w, http.StatusBadRequest, "INVALID_BODY", "idToken is required.")
+		httpx.Error(w, r, http.StatusBadRequest, "INVALID_BODY", "idToken is required.")
 		return
 	}
 	resp, err := common.Auth.LoginGoogle(r.Context(), body.IDToken)
@@ -74,7 +74,7 @@ func LoginGoogle(w http.ResponseWriter, r *http.Request) {
 func Refresh(w http.ResponseWriter, r *http.Request) {
 	var body refreshBody
 	if err := httpx.DecodeJSON(r, &body); err != nil || body.RefreshToken == "" {
-		httpx.Error(w, http.StatusBadRequest, "INVALID_BODY", "refreshToken is required.")
+		httpx.Error(w, r, http.StatusBadRequest, "INVALID_BODY", "refreshToken is required.")
 		return
 	}
 	resp, err := common.Auth.Refresh(r.Context(), body.RefreshToken)
@@ -88,7 +88,7 @@ func Refresh(w http.ResponseWriter, r *http.Request) {
 func Logout(w http.ResponseWriter, r *http.Request) {
 	var body refreshBody
 	if err := httpx.DecodeJSON(r, &body); err != nil || body.RefreshToken == "" {
-		httpx.Error(w, http.StatusBadRequest, "INVALID_BODY", "refreshToken is required.")
+		httpx.Error(w, r, http.StatusBadRequest, "INVALID_BODY", "refreshToken is required.")
 		return
 	}
 	_ = common.Auth.Logout(r.Context(), body.RefreshToken)

@@ -56,9 +56,17 @@
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Swing accesses your photos so you can send them in chats.</string>
 	<key>RCTNewArchEnabled</key>
-	<false/>
+	<true/>
+	<key>UIAppFonts</key>
+	<array>
+		<string>Ionicons.ttf</string>
+	</array>
 	<key>UILaunchStoryboardName</key>
 	<string>SplashScreen</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>remote-notification</string>
+	</array>
 	<key>UIRequiredDeviceCapabilities</key>
 	<array>
 		<string>arm64</string>

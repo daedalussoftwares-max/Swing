@@ -127,3 +127,83 @@ CREATE TABLE IF NOT EXISTS chats (
 
 CREATE INDEX IF NOT EXISTS idx_chats_account_a ON chats(account_a);
 CREATE INDEX IF NOT EXISTS idx_chats_account_b ON chats(account_b);
+
+-- Text messages inside a chat (MVP).
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    chat_id UUID NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    sender_account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    body TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (char_length(body) > 0 AND char_length(body) <= 4000)
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_messages_chat_created
+    ON chat_messages(chat_id, created_at DESC);
+
+-- Per-user read cursor for unread counts.
+CREATE TABLE IF NOT EXISTS chat_read_state (
+    chat_id UUID NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    last_read_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (chat_id, account_id)
+);
+
+-- In-app notification feed (bell).
+CREATE TABLE IF NOT EXISTS notifications (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    body TEXT,
+    from_name TEXT,
+    deep_link TEXT,
+    read_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_account_created
+    ON notifications(account_id, created_at DESC);
+
+-- Chat v2 (seq, media, receipts) — also applied idempotently via migrateChatV2.
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS next_seq bigint NOT NULL DEFAULT 0;
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS last_message_id uuid;
+ALTER TABLE chats ADD COLUMN IF NOT EXISTS last_message_at timestamptz;
+
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS seq bigint;
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS client_msg_id text;
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS type text NOT NULL DEFAULT 'text';
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS media jsonb;
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS reply_to_id uuid REFERENCES chat_messages(id);
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS forwarded boolean NOT NULL DEFAULT false;
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS edited_at timestamptz;
+ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
+ALTER TABLE chat_messages ALTER COLUMN body DROP NOT NULL;
+ALTER TABLE chat_messages DROP CONSTRAINT IF EXISTS chat_messages_body_check;
+
+CREATE TABLE IF NOT EXISTS chat_message_status (
+    message_id uuid REFERENCES chat_messages(id) ON DELETE CASCADE,
+    account_id uuid REFERENCES accounts(id) ON DELETE CASCADE,
+    delivered_at timestamptz,
+    read_at timestamptz,
+    PRIMARY KEY (message_id, account_id)
+);
+CREATE TABLE IF NOT EXISTS chat_message_reactions (
+    message_id uuid REFERENCES chat_messages(id) ON DELETE CASCADE,
+    account_id uuid REFERENCES accounts(id) ON DELETE CASCADE,
+    emoji text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (message_id, account_id)
+);
+CREATE TABLE IF NOT EXISTS chat_message_hidden (
+    message_id uuid REFERENCES chat_messages(id) ON DELETE CASCADE,
+    account_id uuid REFERENCES accounts(id) ON DELETE CASCADE,
+    PRIMARY KEY (message_id, account_id)
+);
+ALTER TABLE chat_read_state ADD COLUMN IF NOT EXISTS last_read_seq bigint NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS device_tokens (
+    account_id uuid REFERENCES accounts(id) ON DELETE CASCADE,
+    token text PRIMARY KEY,
+    platform text NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now()
+);

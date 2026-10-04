@@ -5,6 +5,7 @@ import { ActivityIndicator, StatusBar, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
 import { AuthProfileSync } from '@/components/auth-profile-sync';
+import { PushBootstrap } from '@/components/push-bootstrap';
 import { Colors } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useDismissKeyboardOnBackground } from '@/hooks/use-dismiss-keyboard-on-background';
@@ -13,6 +14,7 @@ import { ChatsProvider } from '@/lib/chats-context';
 import { NotificationsProvider } from '@/lib/notifications-context';
 import { PlaneBalanceProvider } from '@/lib/plane-balance-context';
 import { navigationRef } from '@/lib/router';
+import { InboxPlanesProvider } from '@/lib/inbox-planes-context';
 import { SentPlanesProvider } from '@/lib/sent-planes-context';
 import { UserSettingsProvider } from '@/lib/user-settings-context';
 import { RootNavigator } from '@/navigation/RootNavigator';
@@ -95,13 +97,15 @@ function AppShell() {
       <StatusBar barStyle={colorScheme === 'dark' ? 'light-content' : 'dark-content'} />
       <NotificationsProvider>
         <PlaneBalanceProvider>
-          <SentPlanesProvider>
-            <ChatsProvider>
-              <AuthGate>
-                <RootNavigator />
-              </AuthGate>
-            </ChatsProvider>
-          </SentPlanesProvider>
+          <InboxPlanesProvider>
+            <SentPlanesProvider>
+              <ChatsProvider>
+                <AuthGate>
+                  <RootNavigator />
+                </AuthGate>
+              </ChatsProvider>
+            </SentPlanesProvider>
+          </InboxPlanesProvider>
         </PlaneBalanceProvider>
       </NotificationsProvider>
     </>
@@ -114,6 +118,7 @@ export default function App() {
       <AuthProvider>
         <UserSettingsProvider>
           <AuthProfileSync />
+          <PushBootstrap />
           <NavigationContainer ref={navigationRef}>
             <AppShell />
           </NavigationContainer>

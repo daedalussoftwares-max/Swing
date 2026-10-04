@@ -19,7 +19,6 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Avatar } from '@/components/avatar';
 import { ThemedText } from '@/components/themed-text';
 import { useChats } from '@/lib/chats-context';
-import { MOCK_PLANES } from '@/lib/mock-planes';
 import type { Sender } from '@/types/plane';
 
 const STORY_DURATION_MS = 5000;
@@ -38,7 +37,7 @@ function StoryViewerContent({ userId }: { userId: string }) {
   const partner = useMemo<Sender | null>(() => {
     const fromChat = chats.find((ch) => ch.partner.id === userId)?.partner;
     if (fromChat) return fromChat;
-    return MOCK_PLANES.find((p) => p.sender.id === userId)?.sender ?? null;
+    return null;
   }, [chats, userId]);
 
   const progress = useSharedValue(0);

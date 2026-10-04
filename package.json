@@ -4,6 +4,13 @@
   "scripts": {
     "start": "pnpm --dir client start",
     "android": "pnpm --dir client android",
+    "android:apk": "pnpm --dir client android:apk",
+    "android:device": "pnpm --dir client android:device",
+    "android:device:apk": "pnpm --dir client android:device:apk",
+    "android:device:check": "pnpm --dir client android:device:check",
+    "lan-ip": "pnpm --dir client lan-ip",
+    "lan:sync": "pnpm --dir client lan:sync",
+    "metro:restart": "pnpm --dir client metro:restart",
     "ios": "pnpm --dir client ios",
     "ios:sim": "pnpm --dir client ios:sim",
     "lint": "pnpm --dir client lint"

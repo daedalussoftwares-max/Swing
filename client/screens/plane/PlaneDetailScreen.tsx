@@ -17,16 +17,29 @@ import * as Haptics from '@/lib/native/haptics';
 import { useLocalSearchParams, useRouter } from '@/lib/router';
 import { useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import Animated, {
+  FadeInDown,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+} from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { FriendsCelebration } from '@/components/friends-celebration';
+import { describeSentFilters } from '@/components/plane-filter-model';
+import {
+  FlyingDots,
+  passedOnLabel,
+  planeStatusMeta,
+} from '@/components/plane-status';
 import { ThemedText } from '@/components/themed-text';
 import { Colors, Radii, Spacing } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { useChats } from '@/lib/chats-context';
-import { findPlaneById } from '@/lib/mock-planes';
+import { useInboxPlanes } from '@/lib/inbox-planes-context';
 import { useSentPlanes } from '@/lib/sent-planes-context';
-import type { SentPlane, SentPlaneStatus } from '@/types/sent-plane';
+import type { LiveSentPlane } from '@/lib/planes-mapper';
+import type { Plane } from '@/types/plane';
 
 export default function PlaneDetailScreen() {
   const { id, readOnly } = useLocalSearchParams<{
@@ -37,6 +50,11 @@ export default function PlaneDetailScreen() {
   const c = Colors[scheme];
   const router = useRouter();
   const { acceptPlane } = useChats();
+  const {
+    planes: inboxPlanes,
+    accept: acceptInboxPlane,
+    reject: rejectInboxPlane,
+  } = useInboxPlanes();
   const { sentPlanes } = useSentPlanes();
   // Friends celebration sits between "Accept" and "/chat" — same UX
   // as the home carousel accept. NOTE: this `useState` must live above
@@ -44,10 +62,14 @@ export default function PlaneDetailScreen() {
   const [celebrationChatId, setCelebrationChatId] = useState<string | null>(
     null,
   );
+  // Snapshot of the plane being accepted — the inbox removes it
+  // optimistically, but we still need it for the celebration dialog.
+  const [held, setHeld] = useState<Plane | null>(null);
+  const [busy, setBusy] = useState(false);
 
   // Try the inbound mock list first; fall back to the user's own outbox
   // if `readOnly=1` is set (or if the id matches an outgoing plane).
-  const incoming = id ? findPlaneById(id) : undefined;
+  const incoming = id ? inboxPlanes.find((p) => p.id === id) : undefined;
   const outgoing = id ? sentPlanes.find((p) => p.id === id) : undefined;
   const isReadOnly = readOnly === '1' || (!incoming && !!outgoing);
 
@@ -55,7 +77,7 @@ export default function PlaneDetailScreen() {
     return <SentPlaneDetail plane={outgoing} />;
   }
 
-  const plane = incoming;
+  const plane = incoming ?? (held && held.id === id ? held : undefined);
   if (!plane) {
     return (
       <SafeAreaView style={[styles.root, { backgroundColor: c.background }]}>
@@ -71,10 +93,27 @@ export default function PlaneDetailScreen() {
     );
   }
 
-  const handleAccept = () => {
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    const chat = acceptPlane(plane);
-    setCelebrationChatId(chat.id);
+  const handleAccept = async () => {
+    if (busy) return;
+    setBusy(true);
+    setHeld(plane);
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    try {
+      const chatId = await acceptInboxPlane(plane.id);
+      if (!chatId) {
+        setHeld(null);
+        return;
+      }
+      const chat = await acceptPlane(plane, chatId);
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      setCelebrationChatId(chat.id);
+    } catch {
+      // Inbox rolled the plane back; stay on screen.
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      setHeld(null);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const dismissCelebration = () => {
@@ -95,8 +134,14 @@ export default function PlaneDetailScreen() {
   };
 
   const handleReject = () => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    if (busy) return;
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    // Leave first; the inbox drops the plane optimistically (and restores
+    // it on the home carousel if the request fails).
     router.back();
+    rejectInboxPlane(plane.id).catch(() => {
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    });
   };
 
   const openProfile = () => {
@@ -141,15 +186,21 @@ export default function PlaneDetailScreen() {
           <View style={styles.senderText}>
             <ThemedText style={styles.senderName}>{plane.sender.name}</ThemedText>
             <ThemedText style={[styles.senderMeta, { color: c.textMuted }]}>
-              {plane.sender.ageBadge} · {plane.sender.distanceKm} km away
-              {plane.sender.city ? ` · ${plane.sender.city}` : ''}
+              {[
+                plane.sender.ageBadge || null,
+                plane.sender.distanceKm > 0 ? `${plane.sender.distanceKm} km away` : null,
+                [plane.sender.city, plane.sender.country].filter(Boolean).join(', ') || null,
+              ]
+                .filter(Boolean)
+                .join(' · ') || 'On Swing'}
             </ThemedText>
           </View>
           <Ionicons name="chevron-forward" size={20} color={c.textSubtle} />
         </Pressable>
 
         {/* The plane "paper" itself */}
-        <View
+        <Animated.View
+          entering={FadeInDown.springify().damping(15)}
           style={[
             styles.paper,
             { backgroundColor: c.surface, borderColor: c.border },
@@ -173,44 +224,39 @@ export default function PlaneDetailScreen() {
           <ThemedText style={[styles.timestamp, { color: c.textMuted }]}>
             Sent {timeAgo(plane.sentAt)}
           </ThemedText>
-        </View>
+        </Animated.View>
       </ScrollView>
 
       {/* Bottom action bar */}
       <View style={[styles.actionBar, { borderTopColor: c.border }]}>
-        <Pressable
+        <SpringButton
           onPress={handleReject}
-          style={({ pressed }) => [
+          disabled={busy}
+          style={[
             styles.actionButton,
             styles.rejectButton,
-            {
-              backgroundColor: c.surface,
-              borderColor: c.border,
-              opacity: pressed ? 0.7 : 1,
-            },
+            { backgroundColor: c.surface, borderColor: c.border },
           ]}
         >
           <Ionicons name="close" size={22} color={c.danger} />
           <ThemedText style={[styles.actionLabel, { color: c.danger }]}>
-            Pass
+            Pass it on
           </ThemedText>
-        </Pressable>
-        <Pressable
+        </SpringButton>
+        <SpringButton
           onPress={handleAccept}
-          style={({ pressed }) => [
+          disabled={busy}
+          style={[
             styles.actionButton,
             styles.acceptButton,
-            {
-              backgroundColor: c.success,
-              opacity: pressed ? 0.85 : 1,
-            },
+            { backgroundColor: c.success, opacity: busy ? 0.7 : 1 },
           ]}
         >
           <Ionicons name="checkmark" size={22} color="#fff" />
           <ThemedText style={[styles.actionLabel, { color: '#fff' }]}>
             Accept
           </ThemedText>
-        </Pressable>
+        </SpringButton>
       </View>
 
       {/* Friends dialog — user picks whether to open the chat now or
@@ -230,20 +276,20 @@ export default function PlaneDetailScreen() {
 // planes from the outbox. No accept/reject; just the message + status.
 // ---------------------------------------------------------------------------
 
-function SentPlaneDetail({ plane }: { plane: SentPlane }) {
+function SentPlaneDetail({ plane }: { plane: LiveSentPlane }) {
   const scheme = useColorScheme() ?? 'light';
   const c = Colors[scheme];
   const router = useRouter();
-  const meta = STATUS_META[plane.status];
-  const tint = meta.tint(c);
+  const meta = planeStatusMeta(plane, c);
+  const passed = passedOnLabel(plane);
 
-  // Resolve a name + avatar fallback. Every sent plane has a recipient
-  // since the system pairs each launch with a real user — but for older
-  // mock entries we may only have `recipientName`.
-  const recipientName =
-    plane.recipient?.name ?? plane.recipientName ?? 'Anonymous';
+  const searching = plane.status === 'flying';
+  const recipientName = plane.recipient?.name ?? plane.recipientName;
   const recipientLocation = plane.recipient?.location;
-  const recipientId = plane.recipient?.id;
+  const recipientId = searching ? undefined : plane.recipient?.id;
+  const filterLabel = describeSentFilters(plane.filters);
+  const live = plane.status === 'flying' || plane.status === 'pending';
+  const expiresIn = live && plane.expiresAt ? timeUntil(plane.expiresAt) : null;
 
   return (
     <SafeAreaView
@@ -262,8 +308,7 @@ function SentPlaneDetail({ plane }: { plane: SentPlane }) {
         contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        {/* Recipient card (same shape as the inbound sender card) —
-            tap → profile when we have a real id. */}
+        {/* Status / recipient card — tap → profile when delivered. */}
         <Pressable
           onPress={
             recipientId ? () => router.push(`/profile/${recipientId}`) : undefined
@@ -278,24 +323,27 @@ function SentPlaneDetail({ plane }: { plane: SentPlane }) {
             },
           ]}
         >
-          <View style={[styles.avatar, { backgroundColor: c.tintMuted }]}>
-            <ThemedText
-              style={[styles.avatarInitial, { color: c.tintPressed }]}
-            >
-              {recipientName.charAt(0).toUpperCase()}
-            </ThemedText>
+          <View style={[styles.avatar, { backgroundColor: meta.tint + '1F' }]}>
+            {searching || !recipientName ? (
+              <Ionicons name={meta.icon} size={22} color={meta.tint} />
+            ) : (
+              <ThemedText style={[styles.avatarInitial, { color: meta.tint }]}>
+                {recipientName.charAt(0).toUpperCase()}
+              </ThemedText>
+            )}
           </View>
           <View style={styles.senderText}>
-            <ThemedText style={styles.senderName}>
-              To {recipientName}
-            </ThemedText>
-            <ThemedText style={[styles.senderMeta, { color: c.textMuted }]}>
-              {recipientLocation ? `${recipientLocation} · ` : ''}
-              <ThemedText
-                style={[styles.senderMeta, { color: tint, fontWeight: '600' }]}
-              >
+            <View style={styles.statusRow}>
+              <ThemedText style={[styles.senderName, { color: meta.tint }]}>
                 {meta.label}
               </ThemedText>
+              {meta.animated ? <FlyingDots color={meta.tint} /> : null}
+            </View>
+            <ThemedText style={[styles.senderMeta, { color: c.textMuted }]}>
+              {searching
+                ? 'Looking for the right person to catch it'
+                : [recipientLocation, passed].filter(Boolean).join(' · ') ||
+                  'Waiting on their reply'}
             </ThemedText>
           </View>
           {recipientId ? (
@@ -303,8 +351,9 @@ function SentPlaneDetail({ plane }: { plane: SentPlane }) {
           ) : null}
         </Pressable>
 
-        {/* The paper itself — visually identical to the inbound detail */}
-        <View
+        {/* The paper itself */}
+        <Animated.View
+          entering={FadeInDown.springify().damping(15)}
           style={[
             styles.paper,
             { backgroundColor: c.surface, borderColor: c.border },
@@ -329,45 +378,34 @@ function SentPlaneDetail({ plane }: { plane: SentPlane }) {
             {plane.respondedAt && plane.status === 'accepted'
               ? ` · accepted ${timeAgo(plane.respondedAt)}`
               : ''}
+            {expiresIn ? ` · expires in ${expiresIn}` : ''}
           </ThemedText>
-        </View>
+        </Animated.View>
 
-        {/* Filters used at send-time */}
-        {plane.filters ? (
-          <View
-            style={[
-              styles.filtersCard,
-              { backgroundColor: c.surface, borderColor: c.border },
-            ]}
-          >
-            <ThemedText style={[styles.filtersTitle, { color: c.textMuted }]}>
-              SEND FILTERS
-            </ThemedText>
-            <View style={styles.filtersChips}>
-              {plane.filters.country ? (
-                <FilterChip icon="globe-outline" label={plane.filters.country} />
-              ) : null}
-              {plane.filters.radiusKm ? (
-                <FilterChip
-                  icon="location-outline"
-                  label={`${plane.filters.radiusKm} km`}
-                />
-              ) : null}
-              {plane.filters.gender ? (
-                <FilterChip
-                  icon="person-outline"
-                  label={plane.filters.gender}
-                />
-              ) : null}
-              {plane.filters.ageRange ? (
-                <FilterChip
-                  icon="people-outline"
-                  label={`${plane.filters.ageRange[0]}–${plane.filters.ageRange[1]}`}
-                />
-              ) : null}
-            </View>
+        {/* Journey stats */}
+        <View
+          style={[
+            styles.filtersCard,
+            { backgroundColor: c.surface, borderColor: c.border },
+          ]}
+        >
+          <ThemedText style={[styles.filtersTitle, { color: c.textMuted }]}>
+            JOURNEY
+          </ThemedText>
+          <View style={styles.filtersChips}>
+            <FilterChip
+              icon="airplane-outline"
+              label={`${plane.hops ?? 0} ${(plane.hops ?? 0) === 1 ? 'stop' : 'stops'}`}
+            />
+            <FilterChip
+              icon="return-up-forward-outline"
+              label={passed ?? 'Not passed on yet'}
+            />
+            {filterLabel ? <FilterChip icon="options-outline" label={filterLabel} /> : (
+              <FilterChip icon="earth-outline" label="Anyone, anywhere" />
+            )}
           </View>
-        ) : null}
+        </View>
       </ScrollView>
     </SafeAreaView>
   );
@@ -397,44 +435,45 @@ function FilterChip({
   );
 }
 
-// Recipient-visible label only ever surfaces two states — Accepted or
-// On air. Internally we still track flying / pending / rejected /
-// expired (for analytics, future expiry sweeps, etc.), but the user
-// sees a clean two-state label.
-const STATUS_META: Record<
-  SentPlaneStatus,
-  {
-    icon: keyof typeof Ionicons.glyphMap;
-    label: string;
-    tint: (c: (typeof Colors)['light']) => string;
-  }
-> = {
-  flying: {
-    icon: 'paper-plane-outline',
-    label: 'On air',
-    tint: (c) => c.warning,
-  },
-  pending: {
-    icon: 'paper-plane-outline',
-    label: 'On air',
-    tint: (c) => c.warning,
-  },
-  accepted: {
-    icon: 'checkmark-circle',
-    label: 'Accepted',
-    tint: (c) => c.success,
-  },
-  rejected: {
-    icon: 'paper-plane-outline',
-    label: 'On air',
-    tint: (c) => c.warning,
-  },
-  expired: {
-    icon: 'paper-plane-outline',
-    label: 'On air',
-    tint: (c) => c.warning,
-  },
-};
+function SpringButton({
+  onPress,
+  disabled,
+  style,
+  children,
+}: {
+  onPress: () => void;
+  disabled?: boolean;
+  style: React.ComponentProps<typeof Animated.View>['style'];
+  children: React.ReactNode;
+}) {
+  const press = useSharedValue(1);
+  const animStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: press.value }],
+  }));
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={disabled}
+      onPressIn={() => {
+        press.value = withSpring(0.94, { damping: 15, stiffness: 400 });
+      }}
+      onPressOut={() => {
+        press.value = withSpring(1, { damping: 10, stiffness: 260 });
+      }}
+      style={styles.springWrap}
+    >
+      <Animated.View style={[style, animStyle]}>{children}</Animated.View>
+    </Pressable>
+  );
+}
+
+function timeUntil(iso: string): string | null {
+  const ms = new Date(iso).getTime() - Date.now();
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  const mins = Math.round(ms / 60000);
+  if (mins < 60) return `${Math.max(1, mins)}m`;
+  return `${Math.round(mins / 60)}h`;
+}
 
 function timeAgo(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
@@ -553,12 +592,11 @@ const styles = StyleSheet.create({
     borderRadius: Radii.pill,
   },
   rejectButton: {
-    flex: 1,
     borderWidth: StyleSheet.hairlineWidth,
   },
-  acceptButton: {
-    flex: 2,
-  },
+  acceptButton: {},
+  springWrap: { flex: 1 },
+  statusRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   actionLabel: {
     fontSize: 15,
     fontWeight: '600',

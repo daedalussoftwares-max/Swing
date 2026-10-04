@@ -1,0 +1,8 @@
+{
+  "react-native": {
+    "messaging_android_notification_channel_id": "messages",
+    "messaging_android_notification_color": "@color/notification_icon_color",
+    "messaging_ios_auto_register_for_remote_messages": true,
+    "messaging_ios_foreground_presentation_options": []
+  }
+}

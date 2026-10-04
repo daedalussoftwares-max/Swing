@@ -1,0 +1,4 @@
+allowBuilds:
+  '@firebase/util': false
+  hyochan-welcome: set this to true or false
+  protobufjs: false

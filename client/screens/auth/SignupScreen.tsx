@@ -35,6 +35,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AuthField } from '@/components/auth-field';
 import { AuthHeroCarousel } from '@/components/auth-hero-carousel';
+import { DevErrorFootnote } from '@/components/dev-error-footnote';
 import { BlockingLoader } from '@/components/blocking-loader';
 import { GoogleLogo } from '@/components/google-logo';
 import { ThemedText } from '@/components/themed-text';
@@ -58,16 +59,19 @@ export default function SignupScreen() {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [debugErr, setDebugErr] = useState<unknown>(null);
   const [submitting, setSubmitting] = useState(false);
 
   const handleSubmit = async () => {
     setError(null);
+    setDebugErr(null);
     setSubmitting(true);
     try {
       await signUpWithEmail(email, password);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       router.replace('/(auth)/profile-setup');
     } catch (e) {
+      setDebugErr(e);
       setError(humanizeAuthError(e, 'Something went wrong. Try again.'));
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     } finally {
@@ -77,6 +81,7 @@ export default function SignupScreen() {
 
   const handleGoogle = async () => {
     setError(null);
+    setDebugErr(null);
     if (google.setupError) {
       setError(google.setupError);
       return;
@@ -91,6 +96,7 @@ export default function SignupScreen() {
       );
     } catch (e) {
       if (isGoogleSignInCancelled(e)) return;
+      setDebugErr(e);
       setError(
         humanizeGoogleError(e, humanizeAuthError(e, 'Could not sign in with Google.')),
       );
@@ -180,6 +186,7 @@ export default function SignupScreen() {
                 </ThemedText>
               </View>
             ) : null}
+            <DevErrorFootnote error={debugErr} />
 
             <Pressable
               onPress={handleSubmit}

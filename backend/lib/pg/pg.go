@@ -27,8 +27,8 @@ func Open(ctx context.Context, databaseURL string) (*DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open: %w", err)
 	}
-	db.SetMaxOpenConns(10)
-	db.SetMaxIdleConns(4)
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(8)
 	db.SetConnMaxLifetime(30 * time.Minute)
 
 	pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -60,6 +60,22 @@ func Open(ctx context.Context, databaseURL string) (*DB, error) {
 	if err := migratePlaneEngineV2(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("plane engine v2: %w", err)
+	}
+	if err := migrateChatMessaging(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("chat messaging: %w", err)
+	}
+	if err := migrateChatV2(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("chat v2: %w", err)
+	}
+	if err := migratePlanesV3(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("planes v3: %w", err)
+	}
+	if err := migrateChatV3(ctx, db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("chat v3: %w", err)
 	}
 	if err := migrateFromLegacyUsers(ctx, db); err != nil {
 		_ = db.Close()

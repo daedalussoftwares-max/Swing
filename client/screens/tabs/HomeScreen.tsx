@@ -20,8 +20,8 @@
 import { Ionicons } from '@/lib/native/vector-icons';
 import * as Haptics from '@/lib/native/haptics';
 import { Image } from '@/lib/native/image';
-import { useRouter } from '@/lib/router';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useFocusEffect, useRouter } from '@/lib/router';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   FlatList,
   type NativeScrollEvent,
@@ -57,7 +57,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import { useAuth } from '@/lib/auth-context';
 import { useChats } from '@/lib/chats-context';
-import { MOCK_PLANES } from '@/lib/mock-planes';
+import { useInboxPlanes } from '@/lib/inbox-planes-context';
 import { useNotifications } from '@/lib/notifications-context';
 import { runFirstTimePermissionFlow } from '@/lib/permissions';
 import { useSentPlanes } from '@/lib/sent-planes-context';
@@ -107,9 +107,26 @@ export default function HomeScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const fadeStyle = useTabFocusFade();
   const router = useRouter();
-  const { acceptPlane, chats } = useChats();
-  const { unreadCount } = useNotifications();
+  const { acceptPlane } = useChats();
+  const {
+    planes: inboxPlanes,
+    refresh: refreshInbox,
+    accept: acceptInboxPlane,
+    reject: rejectInboxPlane,
+  } = useInboxPlanes();
+  const { unreadCount, refresh: refreshNotifications } = useNotifications();
   const { total: sentTotal } = useSentPlanes();
+
+  useFocusEffect(
+    useCallback(() => {
+      void refreshInbox();
+      void refreshNotifications();
+      const id = setInterval(() => {
+        void refreshInbox();
+      }, 12_000);
+      return () => clearInterval(id);
+    }, [refreshInbox, refreshNotifications]),
+  );
   const { user } = useUserSettings();
   // The seen-set is keyed by the *auth* account id (e.g. "u_17xxxxxx")
   // and NOT by the local user-settings id (which is always 'me' until
@@ -157,26 +174,21 @@ export default function HomeScreen() {
   // `chats`) to filter the inbox. Using `chats` as part of the source of
   // truth means accepts done from the plane-detail screen also propagate
   // back here automatically.
-  const [rejectedIds, setRejectedIds] = useState<Set<string>>(() => new Set());
-  const acceptedSenderIds = useMemo(
-    () => new Set(chats.map((c) => c.partner.id)),
-    [chats],
-  );
-  const visiblePlanes = useMemo<Plane[]>(
-    () =>
-      MOCK_PLANES.filter(
-        (p) => !rejectedIds.has(p.id) && !acceptedSenderIds.has(p.sender.id),
-      ),
-    [rejectedIds, acceptedSenderIds],
+  const visiblePlanes = inboxPlanes;
+
+  const openPlane = useCallback(
+    (plane: Plane) => {
+      router.push(`/plane/${plane.id}`);
+    },
+    [router],
   );
 
-  const openPlane = (plane: Plane) => {
-    router.push(`/plane/${plane.id}`);
-  };
-
-  const openProfile = (plane: Plane) => {
-    router.push(`/profile/${plane.sender.id}`);
-  };
+  const openProfile = useCallback(
+    (plane: Plane) => {
+      router.push(`/profile/${plane.sender.id}`);
+    },
+    [router],
+  );
 
   // Friends-celebration overlay shown for 3s between "tap Accept" and
   // "land in chat". The chat itself is created synchronously; we just
@@ -186,11 +198,30 @@ export default function HomeScreen() {
     chatId: string;
   } | null>(null);
 
-  const handleAccept = (plane: Plane) => {
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    const chat = acceptPlane(plane);
-    setCelebrationFor({ plane, chatId: chat.id });
-  };
+  // The card has already played its fly-off + haptic by the time these
+  // run; the inbox context removes the plane optimistically and rolls
+  // back if the request fails.
+  const visibleCount = visiblePlanes.length;
+  const clampIndexAfterRemoval = useCallback(() => {
+    setIndex((i) => Math.max(0, Math.min(i, visibleCount - 2)));
+  }, [visibleCount]);
+
+  const handleAccept = useCallback(
+    async (plane: Plane) => {
+      clampIndexAfterRemoval();
+      try {
+        const chatId = await acceptInboxPlane(plane.id);
+        if (!chatId) return;
+        const chat = await acceptPlane(plane, chatId);
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        setCelebrationFor({ plane, chatId: chat.id });
+      } catch {
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+        void refreshInbox();
+      }
+    },
+    [acceptInboxPlane, acceptPlane, refreshInbox, clampIndexAfterRemoval],
+  );
 
   const dismissCelebration = () => {
     // Cancel-style exit — close the dialog, stay on home. The chat
@@ -206,16 +237,17 @@ export default function HomeScreen() {
     router.push(`/chat/${chatId}`);
   };
 
-  const handleReject = (plane: Plane) => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    setRejectedIds((prev) => {
-      const next = new Set(prev);
-      next.add(plane.id);
-      return next;
-    });
-    // Keep the carousel index sensible after removal.
-    setIndex((i) => Math.max(0, Math.min(i, visiblePlanes.length - 2)));
-  };
+  const handleReject = useCallback(
+    async (plane: Plane) => {
+      clampIndexAfterRemoval();
+      try {
+        await rejectInboxPlane(plane.id);
+      } catch {
+        void refreshInbox();
+      }
+    },
+    [rejectInboxPlane, refreshInbox, clampIndexAfterRemoval],
+  );
 
   // Live horizontal scroll offset. Drives the animated page dots so they
   // slide smoothly while the user is still dragging.
@@ -248,13 +280,12 @@ export default function HomeScreen() {
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    setRejectedIds(new Set());
     setIndex(0);
     scrollX.value = 0;
     listRef.current?.scrollToOffset({ offset: 0, animated: false });
-    await new Promise<void>((resolve) => setTimeout(resolve, 650));
+    await refreshInbox();
     setRefreshing(false);
-  }, [scrollX]);
+  }, [scrollX, refreshInbox]);
 
   return (
     <SafeAreaView

@@ -1,22 +1,16 @@
 /**
- * Chats store — accepted paper-plane conversations.
+ * Chats — backed by /v1/chats + WebSocket chat events.
  *
- * Lives in React Context (same shape as `PlaneBalanceProvider`) so it can
- * be migrated to a Firestore listener later without changing consumers.
- *
- * Capabilities exposed by the hook:
- *   - `chats`                 — list of all accepted chats, newest first
- *   - `getChat(id)`           — single chat by id
- *   - `acceptPlane(plane)`    — create a new chat from an accepted plane
- *                               (seeded with the plane's message as the
- *                               first message FROM the partner)
- *   - `sendMessage(id, text)` — append a message from the local user,
- *                               then run a fake "delivered → seen →
- *                               typing → auto-reply" pipeline so the
- *                               Instagram-style status flow can be
- *                               demoed without a backend
- *   - `markChatOpened(id)`    — clear unread counter when entering a thread
- *   - `addReaction(id, mid)`  — toggle a heart reaction (used by long-press)
+ * Design notes (why it is shaped like this):
+ * - Every send is optimistic and goes through a per-chat FIFO queue, so
+ *   rapid-fire messages keep their order and never block the UI.
+ * - Failed sends stay in the thread as `failed` (tap to retry) instead of
+ *   vanishing behind an alert.
+ * - Message status only ever moves forward (sending → sent → delivered →
+ *   seen) no matter which of HTTP response / WS ack / receipt lands first.
+ * - Delivered + read receipts are batched and debounced.
+ * - After every WebSocket reconnect we resync over HTTP, so nothing sent
+ *   while the socket was down is lost.
  */
 
 import {
@@ -24,343 +18,1427 @@ import {
   type ReactNode,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
 } from 'react';
+import { Alert, AppState } from 'react-native';
 
-import type { Chat, ChatMessage, ChatMessageKind } from '@/types/chat';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+import { InAppMessageBanner } from '@/components/in-app-message-banner';
+import { useAuth } from '@/lib/auth-context';
+import type {
+  ApiChatMessage,
+  ApiChatMedia,
+  ApiChatSummary,
+} from '@/lib/api/chats-api';
+import {
+  deleteChatMessage,
+  editChatMessage,
+  listChatMessages,
+  listChats,
+  markChatDelivered,
+  markChatRead,
+  removeChatReaction,
+  sendChatMessage,
+  deleteChatApi,
+  openViewOnceApi,
+  sendChatTyping,
+  setChatPinned,
+  setChatReaction,
+  setUserBlocked,
+} from '@/lib/api/chats-api';
+import type {
+  RealtimeBlockUpdated,
+  RealtimeChatDeleted,
+  RealtimeChatUpdated,
+  RealtimeMessageAck,
+  RealtimeMessageDeleted,
+  RealtimeMessageEdited,
+  RealtimeMessageNew,
+  RealtimeMessageReaction,
+  RealtimeMessageStatus,
+  RealtimeMessageViewed,
+  RealtimePresenceUpdate,
+  RealtimeTyping,
+} from '@/lib/chat-realtime-types';
+import {
+  connectRealtime,
+  disconnectRealtime,
+  onRealtime,
+  onRealtimeStatus,
+  sendRealtime,
+  setRealtimeActiveChat,
+} from '@/lib/realtime-ws';
+import { isPlaneAcceptedNotification } from '@/lib/realtime-notification-sync';
+import { newRequestId } from '@/lib/request-id';
+import { ApiError } from '@/lib/api/client';
+import { getFreshAccessToken } from '@/lib/api/session';
+import { isLocalMediaUri, uploadChatMedia } from '@/lib/upload-media';
+import { logFailure } from '@/lib/debug-logger';
+import type {
+  Chat,
+  ChatMessage,
+  ChatMessageKind,
+  ChatMessageStatus,
+} from '@/types/chat';
 import type { Plane } from '@/types/plane';
 
+function normChatId(id: string): string {
+  return id.trim().toLowerCase();
+}
+
 export type SendPayload = {
-  /** Default 'text'. */
   kind?: ChatMessageKind;
-  /** Body for text messages; also used as alt-text for images / audio. */
   text?: string;
   imageUri?: string;
   audioUri?: string;
   audioDurationMs?: number;
   mediaKey?: string;
-  /** If set, the new message will be tagged as a reply to this message. */
   replyToMessageId?: string;
-  /** Insta-style "view once" — media destroys itself after the first
-   *  open. Ignored for text messages. */
   viewOnce?: boolean;
 };
 
 type ChatsContextValue = {
   chats: Chat[];
+  loading: boolean;
+  refresh: () => Promise<void>;
   getChat: (chatId: string) => Chat | undefined;
-  acceptPlane: (plane: Plane) => Chat;
-  sendMessage: (chatId: string, payload: SendPayload | string) => void;
+  /** Fetches the latest page if not loaded yet, otherwise a delta. */
+  loadMessages: (chatId: string) => Promise<void>;
+  loadOlderMessages: (chatId: string) => Promise<void>;
+  syncChatDelta: (chatId: string) => Promise<void>;
+  acceptPlane: (plane: Plane, chatId: string) => Promise<Chat>;
+  sendMessage: (chatId: string, payload: SendPayload | string) => Promise<void>;
+  retryMessage: (chatId: string, clientMsgId: string) => void;
+  discardMessage: (chatId: string, clientMsgId: string) => void;
   editMessage: (chatId: string, messageId: string, newText: string) => void;
   deleteMessage: (chatId: string, messageId: string) => void;
-  /** Mark a view-once message as viewed — fires when the receiver
-   *  opens the image / finishes playing the audio. The body is then
-   *  considered destroyed and the bubble renders an "Opened" stub. */
-  markViewed: (chatId: string, messageId: string) => void;
+  openViewOnce: (chatId: string, messageId: string) => Promise<string | null>;
   markChatOpened: (chatId: string) => void;
+  /** The chat currently on screen (incoming messages are read instantly). */
+  setActiveChat: (chatId: string | null) => void;
+  setTyping: (chatId: string, isTyping: boolean) => void;
   addReaction: (chatId: string, messageId: string, emoji: string) => void;
-
-  // ── Per-thread management ──────────────────────────────────────────
   pinChat: (chatId: string) => void;
   unpinChat: (chatId: string) => void;
+  /** Deletes the conversation for both people. */
   deleteChat: (chatId: string) => void;
   blockChat: (chatId: string) => void;
   unblockChat: (chatId: string) => void;
+  setUserBlockedState: (userId: string, blocked: boolean) => Promise<void>;
+  /** In-app banner feed: partner messages for chats not on screen. */
+  subscribeIncoming: (fn: IncomingListener) => () => void;
+  /** False until the first chat-list fetch after sign-in finished. */
+  loaded: boolean;
 };
+
+export type IncomingMessageEvent = {
+  chatId: string;
+  partnerName: string;
+  partnerAvatarUrl?: string;
+  preview: string;
+};
+
+type IncomingListener = (e: IncomingMessageEvent) => void;
 
 const ChatsContext = createContext<ChatsContextValue | null>(null);
 
-const AUTO_REPLY_LINES = [
-  "Hey 👋 wasn't expecting a reply this fast.",
-  "Okay, that's actually really sweet of you to say.",
-  "Tell me more — what are you up to today?",
-  "haha you're funny",
-  "Same energy. Big same energy.",
-  "Okay you've earned a follow-up plane from me 🛩️",
-];
+const PAGE_SIZE = 50;
+/** On-device cache of the chat list (+ latest messages) for instant start. */
+const CACHE_PREFIX = 'swing.chats.v1:';
+const CACHE_MESSAGES_PER_CHAT = 30;
+const CACHE_WRITE_DEBOUNCE_MS = 1_000;
+
+/** What we persist: confirmed messages only, newest N per chat. */
+function toCacheable(chats: Chat[]): Chat[] {
+  return chats.map((chat) => {
+    const confirmed = chat.messages.filter(
+      (m) => m.seq != null && m.status !== 'failed' && m.status !== 'sending',
+    );
+    const kept = confirmed.slice(-CACHE_MESSAGES_PER_CHAT);
+    const keptMax = maxSeqOf(kept);
+    return {
+      ...chat,
+      partnerTyping: false,
+      messages: kept,
+      hasOlder: chat.hasOlder || confirmed.length > kept.length,
+      lastSyncedSeq: chat.historyLoaded ? keptMax : chat.lastSyncedSeq,
+    };
+  });
+}
+/** Partner "typing…" auto-clears if the stop event never arrives. */
+const TYPING_TTL_MS = 6_000;
+const RECEIPT_DEBOUNCE_MS = 250;
 
 function nowIso() {
   return new Date().toISOString();
 }
 
-function pickAutoReply() {
-  return AUTO_REPLY_LINES[Math.floor(Math.random() * AUTO_REPLY_LINES.length)];
+function mapKind(type: string): ChatMessageKind {
+  if (type === 'image') return 'image';
+  if (type === 'audio') return 'audio';
+  return 'text';
+}
+
+const STATUS_RANK: Record<ChatMessageStatus, number> = {
+  failed: 0,
+  sending: 1,
+  sent: 2,
+  delivered: 3,
+  seen: 4,
+};
+
+function maxStatus(
+  a: ChatMessageStatus,
+  b: ChatMessageStatus,
+): ChatMessageStatus {
+  return STATUS_RANK[a] >= STATUS_RANK[b] ? a : b;
+}
+
+function tickStatus(m: ApiChatMessage, myUserId: string): ChatMessageStatus {
+  if (m.senderId !== myUserId) {
+    return 'delivered';
+  }
+  const partner = m.status?.find((s) => s.accountId !== myUserId);
+  if (!partner) return 'sent';
+  if (partner.readAt) return 'seen';
+  if (partner.deliveredAt) return 'delivered';
+  return 'sent';
+}
+
+function apiMessageToLocal(m: ApiChatMessage, myUserId: string): ChatMessage {
+  const kind = mapKind(m.type);
+  const text = m.deletedAt ? '' : (m.body ?? (kind === 'text' ? '' : kind));
+  const local: ChatMessage = {
+    id: m.id,
+    seq: m.seq,
+    clientMsgId: m.clientMsgId,
+    authorId: m.senderId === myUserId ? 'me' : m.senderId,
+    kind,
+    text: typeof text === 'string' ? text : '',
+    createdAt: m.createdAt,
+    status: tickStatus(m, myUserId),
+    editedAt: m.editedAt,
+    deletedAt: m.deletedAt,
+    replyToMessageId: m.replyToId,
+    viewOnce: m.viewOnce || undefined,
+    viewedAt: m.viewedAt,
+  };
+  if (m.media?.url) {
+    if (kind === 'image') local.imageUri = m.media.url;
+    if (kind === 'audio') local.audioUri = m.media.url;
+    local.mediaKey = m.media.r2_key;
+  }
+  if (m.media?.duration) {
+    local.audioDurationMs = m.media.duration;
+  }
+  const theirs = m.reactions?.find((r) => r.accountId !== myUserId);
+  if (theirs?.emoji) {
+    local.reaction = theirs.emoji;
+  }
+  return local;
+}
+
+/** Confirmed messages by seq; pending/failed (no seq yet) stay at the end. */
+function compareMessages(a: ChatMessage, b: ChatMessage): number {
+  const sa = a.seq ?? Number.MAX_SAFE_INTEGER;
+  const sb = b.seq ?? Number.MAX_SAFE_INTEGER;
+  if (sa !== sb) return sa - sb;
+  return a.createdAt.localeCompare(b.createdAt);
+}
+
+/** Server copy wins for content, but local-only bits are preserved. */
+function reconcile(prev: ChatMessage | undefined, next: ChatMessage): ChatMessage {
+  if (!prev) return next;
+  return {
+    ...next,
+    status: maxStatus(prev.status, next.status),
+    // Keep the already-rendered local file while the presigned URL is new,
+    // so the bubble doesn't flash/reload right after sending.
+    imageUri: prev.imageUri && prev.authorId === 'me' ? prev.imageUri : next.imageUri,
+    audioUri: prev.audioUri && prev.authorId === 'me' ? prev.audioUri : next.audioUri,
+    audioDurationMs: next.audioDurationMs ?? prev.audioDurationMs,
+    viewOnce: next.viewOnce ?? prev.viewOnce,
+    viewedAt: next.viewedAt ?? prev.viewedAt,
+    reaction: next.reaction ?? prev.reaction,
+  };
+}
+
+function mergeMessages(
+  existing: ChatMessage[],
+  incoming: ChatMessage[],
+): ChatMessage[] {
+  if (incoming.length === 0) return existing;
+  const byId = new Map(existing.map((m) => [m.id, m]));
+  const idByClient = new Map<string, string>();
+  for (const m of existing) {
+    if (m.clientMsgId) idByClient.set(m.clientMsgId, m.id);
+  }
+  let needsSort = false;
+  const lastSeq = existing.reduce((n, m) => Math.max(n, m.seq ?? 0), 0);
+  for (const m of incoming) {
+    let prev = byId.get(m.id);
+    if (!prev && m.clientMsgId) {
+      const localId = idByClient.get(m.clientMsgId);
+      if (localId) {
+        prev = byId.get(localId);
+        byId.delete(localId);
+      }
+    }
+    byId.set(m.id, reconcile(prev, m));
+    if (!prev || prev.seq !== m.seq || (m.seq ?? 0) <= lastSeq) {
+      needsSort = true;
+    }
+  }
+  const merged = [...byId.values()];
+  if (needsSort) merged.sort(compareMessages);
+  return merged;
+}
+
+function maxSeqOf(messages: ChatMessage[]): number {
+  let n = 0;
+  for (const m of messages) n = Math.max(n, m.seq ?? 0);
+  return n;
+}
+
+function minSeqOf(messages: ChatMessage[]): number | undefined {
+  let n: number | undefined;
+  for (const m of messages) {
+    if (m.seq != null && (n == null || m.seq < n)) n = m.seq;
+  }
+  return n;
+}
+
+function partnerOnline(s: ApiChatSummary): boolean {
+  return !!s.partner.online;
 }
 
 export function ChatsProvider({ children }: { children: ReactNode }) {
-  const [chats, setChats] = useState<Chat[]>([]);
-  // Tracks timeouts so they can be cleared if the component unmounts during
-  // a fake reply sequence (avoids warnings about setState on unmounted refs).
-  const pendingTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const { status, user } = useAuth();
+  const myUserId = user?.id ?? '';
+  const [chats, setChatsState] = useState<Chat[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const incomingListeners = useRef(new Set<IncomingListener>());
+  const fetchedOnce = useRef(false);
+  const cacheUserRef = useRef<string | null>(null);
+
+  // Synchronous mirror of `chats` for async callbacks (avoids stale
+  // closures and the "read state via setState" anti-pattern).
+  const chatsRef = useRef<Chat[]>([]);
+  // All writes go through here and are applied eagerly to the ref, so
+  // reads right after a write (even across `await`) see the new value.
+  const setChats = useCallback((updater: (prev: Chat[]) => Chat[]) => {
+    const next = updater(chatsRef.current);
+    if (next === chatsRef.current) return;
+    chatsRef.current = next;
+    setChatsState(next);
+  }, []);
+
+  const activeChatRef = useRef<string | null>(null);
+  const sendQueues = useRef(new Map<string, Promise<void>>());
+  const pendingPayloads = useRef(new Map<string, SendPayload>());
+  const typingTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const deliverQueue = useRef(new Map<string, Set<string>>());
+  const deliverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const readTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const lastReadSent = useRef(new Map<string, number>());
+  const loadingHistory = useRef(new Set<string>());
+
+  const findChat = useCallback((chatId: string) => {
+    const key = normChatId(chatId);
+    return chatsRef.current.find((c) => normChatId(c.id) === key);
+  }, []);
 
   const updateChat = useCallback(
     (chatId: string, updater: (chat: Chat) => Chat) => {
-      setChats((prev) =>
-        prev.map((chat) => (chat.id === chatId ? updater(chat) : chat)),
+      const key = normChatId(chatId);
+      setChats((prev) => {
+        let changed = false;
+        const next = prev.map((chat) => {
+          if (normChatId(chat.id) !== key) return chat;
+          const updated = updater(chat);
+          if (updated !== chat) changed = true;
+          return updated;
+        });
+        return changed ? next : prev;
+      });
+    },
+    [setChats],
+  );
+
+  // ── Receipts ──────────────────────────────────────────────────────────
+
+  const flushDelivered = useCallback(() => {
+    deliverTimer.current = null;
+    const batches = [...deliverQueue.current.entries()];
+    deliverQueue.current.clear();
+    for (const [chatId, ids] of batches) {
+      if (ids.size === 0) continue;
+      void markChatDelivered(chatId, [...ids]).catch(() => {});
+    }
+  }, []);
+
+  const queueDelivered = useCallback(
+    (chatId: string, ids: string[]) => {
+      if (ids.length === 0) return;
+      let set = deliverQueue.current.get(chatId);
+      if (!set) {
+        set = new Set();
+        deliverQueue.current.set(chatId, set);
+      }
+      for (const id of ids) set.add(id);
+      if (!deliverTimer.current) {
+        deliverTimer.current = setTimeout(flushDelivered, RECEIPT_DEBOUNCE_MS);
+      }
+    },
+    [flushDelivered],
+  );
+
+  /** Debounced read receipt up to the newest loaded message. */
+  const scheduleRead = useCallback(
+    (chatId: string) => {
+      const key = normChatId(chatId);
+      const existing = readTimers.current.get(key);
+      if (existing) clearTimeout(existing);
+      readTimers.current.set(
+        key,
+        setTimeout(() => {
+          readTimers.current.delete(key);
+          const chat = findChat(chatId);
+          if (!chat) return;
+          const upTo = Math.max(maxSeqOf(chat.messages), chat.lastSyncedSeq ?? 0);
+          if (upTo <= (lastReadSent.current.get(key) ?? 0)) return;
+          lastReadSent.current.set(key, upTo);
+          void markChatRead(chat.id, upTo).catch(() => {
+            lastReadSent.current.delete(key);
+          });
+        }, RECEIPT_DEBOUNCE_MS),
       );
+    },
+    [findChat],
+  );
+
+  const isViewing = useCallback((chatId: string) => {
+    return (
+      activeChatRef.current != null &&
+      normChatId(activeChatRef.current) === normChatId(chatId) &&
+      AppState.currentState === 'active'
+    );
+  }, []);
+
+  // ── Loading ───────────────────────────────────────────────────────────
+
+  const refresh = useCallback(async () => {
+    if (status !== 'signed-in' || !myUserId) {
+      return;
+    }
+    setLoading(true);
+    try {
+      const summaries = await listChats();
+      setChats((prev) => {
+        const byId = new Map(prev.map((c) => [normChatId(c.id), c]));
+        return summaries.map((s) => {
+          const existing = byId.get(normChatId(s.id));
+          let messages = existing?.messages ?? [];
+          if (s.lastMessage) {
+            // Seed the list preview without pretending history is loaded.
+            messages = mergeMessages(messages, [
+              apiMessageToLocal(s.lastMessage, myUserId),
+            ]);
+          }
+          const viewing = isViewing(s.id);
+          return {
+            id: s.id,
+            nextSeq: s.nextSeq,
+            lastSyncedSeq: existing?.lastSyncedSeq,
+            historyLoaded: existing?.historyLoaded,
+            hasOlder: existing?.hasOlder,
+            partner: {
+              ...(existing?.partner ?? {}),
+              id: s.partner.id,
+              name: s.partner.name,
+              avatarUrl: s.partner.avatarUrl,
+              distanceKm: existing?.partner.distanceKm ?? 0,
+              ageBadge: existing?.partner.ageBadge ?? '',
+              city: s.partner.city,
+              country: s.partner.country,
+              onlineNow: partnerOnline(s) && !s.blockedByMe,
+            },
+            messages,
+            unreadCount: viewing ? 0 : s.unreadCount,
+            partnerTyping: existing?.partnerTyping ?? false,
+            createdAt: s.createdAt,
+            pinnedAt: s.pinnedAt,
+            isBlocked: !!s.blockedByMe,
+          };
+        });
+      });
+    } catch {
+      logFailure({
+        kind: 'api',
+        message: 'Failed to load chat list',
+        path: '/v1/chats',
+      });
+    } finally {
+      setLoading(false);
+      setLoaded(true);
+      fetchedOnce.current = true;
+    }
+  }, [status, myUserId, setChats, isViewing]);
+
+  // Instant start: show the cached list while the network refresh runs.
+  useEffect(() => {
+    if (status !== 'signed-in' || !myUserId) return;
+    cacheUserRef.current = myUserId;
+    let cancelled = false;
+    void AsyncStorage.getItem(CACHE_PREFIX + myUserId)
+      .then((raw) => {
+        if (cancelled || !raw || fetchedOnce.current || chatsRef.current.length > 0) {
+          return;
+        }
+        const cached = JSON.parse(raw) as Chat[];
+        if (!Array.isArray(cached) || cached.length === 0) return;
+        setChats(() => cached);
+        setLoaded(true);
+      })
+      .catch(() => {
+        /* corrupt / unavailable cache — the network load still runs */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [status, myUserId, setChats]);
+
+  // Persist (debounced) whenever chats change.
+  useEffect(() => {
+    if (status !== 'signed-in' || !myUserId || !loaded) return;
+    const timer = setTimeout(() => {
+      void AsyncStorage.setItem(
+        CACHE_PREFIX + myUserId,
+        JSON.stringify(toCacheable(chatsRef.current)),
+      ).catch(() => {});
+    }, CACHE_WRITE_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [chats, status, myUserId, loaded]);
+
+  const applyIncoming = useCallback(
+    (chatId: string, rows: ApiChatMessage[]) => {
+      if (!myUserId || rows.length === 0) return;
+      const locals = rows.map((m) => apiMessageToLocal(m, myUserId));
+      const fromPartner = rows.filter((m) => m.senderId !== myUserId);
+      queueDelivered(
+        chatId,
+        fromPartner.filter((m) => !m.deletedAt).map((m) => m.id),
+      );
+      const maxSeq = rows.reduce((n, m) => Math.max(n, m.seq ?? 0), 0);
+      const key = normChatId(chatId);
+      const viewing = isViewing(chatId);
+      if (!findChat(chatId)) {
+        // Brand-new chat (e.g. partner accepted my plane and wrote first):
+        // fetch the real summary so name/avatar are right.
+        void refresh();
+        return;
+      }
+      setChats((prev) =>
+        prev.map((chat) => {
+          if (normChatId(chat.id) !== key) return chat;
+          const known = new Set(chat.messages.map((m) => m.id));
+          const freshFromPartner = fromPartner.filter(
+            (m) => !known.has(m.id) && (m.seq ?? 0) > (chat.lastSyncedSeq ?? 0),
+          ).length;
+          return {
+            ...chat,
+            messages: mergeMessages(chat.messages, locals),
+            lastSyncedSeq: Math.max(chat.lastSyncedSeq ?? 0, maxSeq),
+            nextSeq: Math.max(chat.nextSeq ?? 0, maxSeq),
+            unreadCount: viewing ? 0 : chat.unreadCount + freshFromPartner,
+            partnerTyping: fromPartner.length > 0 ? false : chat.partnerTyping,
+          };
+        }),
+      );
+      if (viewing && fromPartner.length > 0) scheduleRead(chatId);
+    },
+    [myUserId, queueDelivered, isViewing, findChat, refresh, setChats, scheduleRead],
+  );
+
+  const syncChatDelta = useCallback(
+    async (chatId: string) => {
+      if (!myUserId) return;
+      const chat = findChat(chatId);
+      if (!chat?.historyLoaded) return;
+      let after = chat.lastSyncedSeq ?? maxSeqOf(chat.messages);
+      try {
+        // Page forward until caught up (long offline periods).
+        for (let i = 0; i < 10; i++) {
+          const rows = await listChatMessages(chatId, {
+            afterSeq: after,
+            limit: 100,
+          });
+          if (rows.length === 0) break;
+          applyIncoming(chatId, rows);
+          after = rows.reduce((n, m) => Math.max(n, m.seq ?? 0), after);
+          if (rows.length < 100) break;
+        }
+      } catch {
+        /* best effort */
+      }
+    },
+    [myUserId, findChat, applyIncoming],
+  );
+
+  const loadMessages = useCallback(
+    async (chatId: string) => {
+      if (!myUserId) return;
+      const existing = findChat(chatId);
+      if (existing?.historyLoaded) {
+        await syncChatDelta(chatId);
+        return;
+      }
+      const key = normChatId(chatId);
+      if (loadingHistory.current.has(key)) return;
+      loadingHistory.current.add(key);
+      try {
+        const rows = await listChatMessages(chatId, { limit: PAGE_SIZE });
+        const incoming = rows.map((m) => apiMessageToLocal(m, myUserId));
+        const maxSeq = rows.reduce((n, m) => Math.max(n, m.seq ?? 0), 0);
+        queueDelivered(
+          chatId,
+          rows.filter((m) => m.senderId !== myUserId).map((m) => m.id),
+        );
+        setChats((prev) =>
+          prev.map((c) =>
+            normChatId(c.id) === key
+              ? {
+                  ...c,
+                  messages: mergeMessages(c.messages, incoming),
+                  lastSyncedSeq: Math.max(c.lastSyncedSeq ?? 0, maxSeq),
+                  historyLoaded: true,
+                  hasOlder: rows.length >= PAGE_SIZE,
+                }
+              : c,
+          ),
+        );
+        if (isViewing(chatId)) scheduleRead(chatId);
+      } catch {
+        logFailure({
+          kind: 'api',
+          message: 'Failed to load chat messages',
+          path: `/v1/chats/${chatId}/messages`,
+        });
+      } finally {
+        loadingHistory.current.delete(key);
+      }
+    },
+    [myUserId, findChat, syncChatDelta, queueDelivered, setChats, isViewing, scheduleRead],
+  );
+
+  const loadOlderMessages = useCallback(
+    async (chatId: string) => {
+      if (!myUserId) return;
+      const chat = findChat(chatId);
+      if (!chat?.historyLoaded || chat.hasOlder === false) return;
+      const key = normChatId(chatId);
+      if (loadingHistory.current.has(key)) return;
+      const beforeSeq = minSeqOf(chat.messages);
+      if (beforeSeq == null || beforeSeq <= 1) {
+        updateChat(chatId, (c) => ({ ...c, hasOlder: false }));
+        return;
+      }
+      loadingHistory.current.add(key);
+      try {
+        const rows = await listChatMessages(chatId, {
+          beforeSeq,
+          limit: PAGE_SIZE,
+        });
+        const incoming = rows.map((m) => apiMessageToLocal(m, myUserId));
+        updateChat(chatId, (c) => ({
+          ...c,
+          messages: mergeMessages(c.messages, incoming),
+          hasOlder: rows.length >= PAGE_SIZE,
+        }));
+      } catch {
+        /* user can scroll again to retry */
+      } finally {
+        loadingHistory.current.delete(key);
+      }
+    },
+    [myUserId, findChat, updateChat],
+  );
+
+  // ── Lifecycle ─────────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (status !== 'signed-in' || !myUserId) {
+      if (status !== 'signed-in') {
+        setChats(() => []);
+        setLoaded(false);
+        fetchedOnce.current = false;
+        lastReadSent.current.clear();
+        // Don't leave someone's conversations on a shared phone.
+        if (cacheUserRef.current) {
+          void AsyncStorage.removeItem(CACHE_PREFIX + cacheUserRef.current).catch(() => {});
+          cacheUserRef.current = null;
+        }
+      }
+      return;
+    }
+    void refresh();
+  }, [status, myUserId, refresh, setChats]);
+
+  // Resync after every reconnect: list + open threads catch up on
+  // anything that happened while the socket was down.
+  useEffect(() => {
+    if (status !== 'signed-in' || !myUserId) return;
+    let wasConnected = true;
+    return onRealtimeStatus((connected) => {
+      if (connected && !wasConnected) {
+        void refresh();
+        for (const chat of chatsRef.current) {
+          if (chat.historyLoaded) void syncChatDelta(chat.id);
+        }
+      }
+      wasConnected = connected;
+    });
+  }, [status, myUserId, refresh, syncChatDelta]);
+
+  const clearTypingLater = useCallback(
+    (chatId: string) => {
+      const key = normChatId(chatId);
+      const prev = typingTimers.current.get(key);
+      if (prev) clearTimeout(prev);
+      typingTimers.current.set(
+        key,
+        setTimeout(() => {
+          typingTimers.current.delete(key);
+          updateChat(chatId, (chat) =>
+            chat.partnerTyping ? { ...chat, partnerTyping: false } : chat,
+          );
+        }, TYPING_TTL_MS),
+      );
+    },
+    [updateChat],
+  );
+
+  useEffect(() => {
+    if (status !== 'signed-in') {
+      disconnectRealtime();
+      return;
+    }
+    void connectRealtime();
+    return onRealtime((type, data) => {
+      if (!data || typeof data !== 'object' || !myUserId) return;
+
+      if (type === 'message.new') {
+        const payload = data as RealtimeMessageNew;
+        if (!payload.chatId || !payload.message) return;
+        applyIncoming(payload.chatId, [payload.message]);
+        const m = payload.message;
+        if (
+          m.senderId !== myUserId &&
+          !m.deletedAt &&
+          AppState.currentState === 'active' &&
+          !isViewing(payload.chatId)
+        ) {
+          const chat = findChat(payload.chatId);
+          if (chat && !chat.isBlocked) {
+            const preview =
+              m.type === 'image'
+                ? '📷 Photo'
+                : m.type === 'audio'
+                  ? '🎤 Voice message'
+                  : (m.body ?? '');
+            for (const fn of incomingListeners.current) {
+              fn({
+                chatId: chat.id,
+                partnerName: chat.partner.name,
+                partnerAvatarUrl: chat.partner.avatarUrl,
+                preview,
+              });
+            }
+          }
+        }
+        return;
+      }
+
+      if (type === 'message.viewed') {
+        const v = data as RealtimeMessageViewed;
+        if (!v.chatId || !v.messageId) return;
+        updateChat(v.chatId, (chat) => ({
+          ...chat,
+          messages: chat.messages.map((m) =>
+            m.id === v.messageId && !m.viewedAt ? { ...m, viewedAt: v.viewedAt } : m,
+          ),
+        }));
+        return;
+      }
+
+      if (type === 'chat.deleted') {
+        const d = data as RealtimeChatDeleted;
+        if (!d.chatId) return;
+        const key = normChatId(d.chatId);
+        setChats((prev) =>
+          prev.some((c) => normChatId(c.id) === key)
+            ? prev.filter((c) => normChatId(c.id) !== key)
+            : prev,
+        );
+        return;
+      }
+
+      if (type === 'chat.updated') {
+        const u = data as RealtimeChatUpdated;
+        if (!u.chatId) return;
+        updateChat(u.chatId, (chat) => ({
+          ...chat,
+          pinnedAt: u.pinnedAt ?? undefined,
+        }));
+        return;
+      }
+
+      if (type === 'block.updated') {
+        const b = data as RealtimeBlockUpdated;
+        if (!b.userId) return;
+        setChats((prev) => {
+          let changed = false;
+          const next = prev.map((chat) => {
+            if (chat.partner.id !== b.userId || !!chat.isBlocked === b.blocked) {
+              return chat;
+            }
+            changed = true;
+            return { ...chat, isBlocked: b.blocked, partnerTyping: false };
+          });
+          return changed ? next : prev;
+        });
+        return;
+      }
+
+      if (type === 'message.ack') {
+        const ack = data as RealtimeMessageAck;
+        for (const chat of chatsRef.current) {
+          const local = chat.messages.find(
+            (m) => m.clientMsgId === ack.client_msg_id,
+          );
+          if (!local) continue;
+          updateChat(chat.id, (c) => ({
+            ...c,
+            messages: mergeMessages(c.messages, [
+              {
+                ...local,
+                id: ack.id,
+                seq: ack.seq,
+                createdAt: ack.created_at,
+                status: maxStatus(local.status, 'sent'),
+              },
+            ]),
+            lastSyncedSeq: Math.max(c.lastSyncedSeq ?? 0, ack.seq),
+          }));
+          break;
+        }
+        return;
+      }
+
+      if (type === 'message.status') {
+        const st = data as RealtimeMessageStatus;
+        if (st.up_to_seq && st.chat_id && st.read_at) {
+          const upTo = st.up_to_seq;
+          updateChat(st.chat_id, (chat) => ({
+            ...chat,
+            messages: chat.messages.map((m) =>
+              m.authorId === 'me' && m.seq != null && m.seq <= upTo && m.status !== 'seen'
+                ? { ...m, status: 'seen' }
+                : m,
+            ),
+          }));
+        }
+        if (st.message_id && st.delivered_at) {
+          const apply = (chat: Chat): Chat => {
+            let hit = false;
+            const messages = chat.messages.map((m) => {
+              if (m.id !== st.message_id || m.authorId !== 'me') return m;
+              hit = true;
+              return { ...m, status: maxStatus(m.status, 'delivered') };
+            });
+            return hit ? { ...chat, messages } : chat;
+          };
+          if (st.chat_id) updateChat(st.chat_id, apply);
+          else setChats((prev) => prev.map(apply));
+        }
+        return;
+      }
+
+      if (type === 'message.reaction') {
+        const r = data as RealtimeMessageReaction;
+        if (!r.chatId || !r.messageId || r.accountId === myUserId) return;
+        updateChat(r.chatId, (chat) => ({
+          ...chat,
+          messages: chat.messages.map((m) =>
+            m.id === r.messageId ? { ...m, reaction: r.emoji || undefined } : m,
+          ),
+        }));
+        return;
+      }
+
+      if (type === 'message.edited') {
+        const payload = data as RealtimeMessageEdited;
+        if (!payload.chatId || !payload.message) return;
+        const local = apiMessageToLocal(payload.message, myUserId);
+        updateChat(payload.chatId, (chat) => ({
+          ...chat,
+          messages: chat.messages.map((m) =>
+            m.id === local.id ? reconcile(m, local) : m,
+          ),
+        }));
+        return;
+      }
+
+      if (type === 'message.deleted') {
+        const payload = data as RealtimeMessageDeleted;
+        if (!payload.chatId || !payload.messageId) return;
+        updateChat(payload.chatId, (chat) => ({
+          ...chat,
+          messages: chat.messages.map((m) =>
+            m.id === payload.messageId
+              ? { ...m, text: '', deletedAt: payload.deletedAt }
+              : m,
+          ),
+        }));
+        return;
+      }
+
+      if (type === 'typing') {
+        const t = data as RealtimeTyping;
+        if (!t.chatId || t.userId === myUserId) return;
+        updateChat(t.chatId, (chat) =>
+          chat.partnerTyping === t.isTyping
+            ? chat
+            : { ...chat, partnerTyping: t.isTyping },
+        );
+        if (t.isTyping) clearTypingLater(t.chatId);
+        return;
+      }
+
+      if (type === 'presence.update') {
+        const p = data as RealtimePresenceUpdate;
+        if (!p.userId) return;
+        setChats((prev) => {
+          let changed = false;
+          const next = prev.map((chat) => {
+            if (chat.partner.id !== p.userId) return chat;
+            if (chat.partner.onlineNow === p.online) return chat;
+            changed = true;
+            return {
+              ...chat,
+              partner: { ...chat.partner, onlineNow: p.online },
+              partnerTyping: p.online ? chat.partnerTyping : false,
+            };
+          });
+          return changed ? next : prev;
+        });
+        return;
+      }
+
+      if (type === 'notification.new' && isPlaneAcceptedNotification(data)) {
+        // My plane was accepted → a new chat exists for me.
+        void refresh();
+      }
+    });
+  }, [status, myUserId, applyIncoming, refresh, updateChat, setChats, clearTypingLater, findChat, isViewing]);
+
+  // Flush pending receipts on unmount.
+  useEffect(
+    () => () => {
+      if (deliverTimer.current) clearTimeout(deliverTimer.current);
+      for (const t of readTimers.current.values()) clearTimeout(t);
+      for (const t of typingTimers.current.values()) clearTimeout(t);
     },
     [],
   );
 
-  const updateMessage = useCallback(
-    (
-      chatId: string,
-      messageId: string,
-      updater: (msg: ChatMessage) => ChatMessage,
-    ) => {
+  const getChat = useCallback(
+    (chatId: string) => {
+      const key = normChatId(chatId);
+      return chats.find((c) => normChatId(c.id) === key);
+    },
+    [chats],
+  );
+
+  const acceptPlane = useCallback(
+    async (plane: Plane, chatId: string): Promise<Chat> => {
+      await refresh();
+      const found = findChat(chatId);
+      if (found) {
+        void loadMessages(chatId);
+        return found;
+      }
+      const fallback: Chat = {
+        id: chatId,
+        partner: plane.sender,
+        messages: [],
+        unreadCount: 0,
+        partnerTyping: false,
+        createdAt: nowIso(),
+      };
+      setChats((prev) =>
+        prev.some((c) => normChatId(c.id) === normChatId(chatId))
+          ? prev
+          : [fallback, ...prev],
+      );
+      void loadMessages(chatId);
+      return fallback;
+    },
+    [refresh, findChat, loadMessages, setChats],
+  );
+
+  const setActiveChat = useCallback(
+    (chatId: string | null) => {
+      activeChatRef.current = chatId;
+      setRealtimeActiveChat(chatId);
+      if (chatId) {
+        updateChat(chatId, (c) => (c.unreadCount ? { ...c, unreadCount: 0 } : c));
+        scheduleRead(chatId);
+      }
+    },
+    [updateChat, scheduleRead],
+  );
+
+  const markChatOpened = useCallback(
+    (chatId: string) => {
+      updateChat(chatId, (c) => (c.unreadCount ? { ...c, unreadCount: 0 } : c));
+      scheduleRead(chatId);
+    },
+    [updateChat, scheduleRead],
+  );
+
+  // Typing goes over the socket (no HTTP per keystroke). HTTP fallback only
+  // for the "stopped" edge so the partner's indicator doesn't stick.
+  const setTyping = useCallback((chatId: string, isTyping: boolean) => {
+    if (sendRealtime('typing', { chatId, isTyping })) return;
+    if (!isTyping) void sendChatTyping(chatId, false).catch(() => {});
+  }, []);
+
+  // ── Sending ───────────────────────────────────────────────────────────
+
+  const buildMedia = (
+    kind: ChatMessageKind,
+    p: SendPayload,
+  ): ApiChatMedia | undefined => {
+    if (!p.mediaKey) return undefined;
+    const mime =
+      kind === 'image'
+        ? 'image/jpeg'
+        : kind === 'audio'
+          ? 'audio/m4a'
+          : 'application/octet-stream';
+    return {
+      r2_key: p.mediaKey,
+      mime,
+      size: 0,
+      ...(kind === 'audio' && p.audioDurationMs
+        ? { duration: Math.round(p.audioDurationMs) }
+        : {}),
+    };
+  };
+
+  /** Runs `task` after every earlier send in the same chat finished. */
+  const enqueueSend = useCallback((chatId: string, task: () => Promise<void>) => {
+    const key = normChatId(chatId);
+    const prev = sendQueues.current.get(key) ?? Promise.resolve();
+    const next = prev.then(task, task);
+    sendQueues.current.set(key, next);
+    void next.finally(() => {
+      if (sendQueues.current.get(key) === next) sendQueues.current.delete(key);
+    });
+    return next;
+  }, []);
+
+  const markFailed = useCallback(
+    (chatId: string, clientMsgId: string, e: unknown) => {
+      logFailure({
+        kind: 'api',
+        code: e instanceof ApiError ? e.code : 'UNKNOWN',
+        message: e instanceof Error ? e.message : 'Send failed',
+        path: `/v1/chats/${chatId}/messages`,
+      });
       updateChat(chatId, (chat) => ({
         ...chat,
         messages: chat.messages.map((m) =>
-          m.id === messageId ? updater(m) : m,
+          m.clientMsgId === clientMsgId && m.status === 'sending'
+            ? { ...m, status: 'failed' }
+            : m,
         ),
       }));
     },
     [updateChat],
   );
 
-  const acceptPlane = useCallback((plane: Plane): Chat => {
-    const chatId = `chat_${plane.sender.id}`;
-
-    const seedMessage: ChatMessage = {
-      id: `${chatId}_seed`,
-      authorId: plane.sender.id,
-      kind: 'text',
-      text: plane.message,
-      createdAt: plane.sentAt,
-      status: 'seen',
-    };
-
-    const next: Chat = {
-      id: chatId,
-      partner: plane.sender,
-      messages: [seedMessage],
-      unreadCount: 0,
-      partnerTyping: false,
-      createdAt: nowIso(),
-    };
-
-    setChats((prev) => {
-      // De-dupe — if the same sender's chat already exists (e.g. multiple
-      // planes from them), bring it to the top instead of duplicating.
-      const existingIdx = prev.findIndex((c) => c.id === chatId);
-      if (existingIdx >= 0) {
-        const copy = [...prev];
-        const [existing] = copy.splice(existingIdx, 1);
-        return [existing, ...copy];
+  /** Uploads local media for a pending message (outside the send queue,
+   *  so a slow photo upload doesn't hold back text messages). */
+  const ensureUploaded = useCallback(
+    async (chatId: string, p: SendPayload) => {
+      if (p.mediaKey || (p.kind !== 'image' && p.kind !== 'audio')) return;
+      const uri = p.kind === 'image' ? p.imageUri : p.audioUri;
+      if (!uri || !isLocalMediaUri(uri)) return;
+      const token = await getFreshAccessToken();
+      if (!token) {
+        throw new ApiError('UNAUTHORIZED', 'Please sign in again.');
       }
-      return [next, ...prev];
-    });
-
-    return next;
-  }, []);
-
-  const markChatOpened = useCallback(
-    (chatId: string) => {
-      updateChat(chatId, (chat) => ({ ...chat, unreadCount: 0 }));
+      const uploaded = await uploadChatMedia(token, chatId, uri, p.kind);
+      p.mediaKey = uploaded.mediaKey;
     },
-    [updateChat],
+    [],
+  );
+
+  const deliver = useCallback(
+    async (chatId: string, clientMsgId: string) => {
+      const p = pendingPayloads.current.get(clientMsgId);
+      if (!p) return;
+      try {
+        await ensureUploaded(chatId, p);
+      } catch (e) {
+        markFailed(chatId, clientMsgId, e);
+        return;
+      }
+      await enqueueSend(chatId, async () => {
+        if (!pendingPayloads.current.has(clientMsgId)) return;
+        const kind: ChatMessageKind = p.kind ?? 'text';
+        const text = (p.text ?? '').trim();
+        const msgType =
+          kind === 'image' ? 'image' : kind === 'audio' ? 'audio' : 'text';
+        try {
+          const saved = await sendChatMessage(chatId, {
+            text: kind === 'text' ? text : text || undefined,
+            client_msg_id: clientMsgId,
+            type: msgType,
+            media: buildMedia(kind, p),
+            reply_to_id: p.replyToMessageId,
+            view_once: p.viewOnce,
+          });
+          pendingPayloads.current.delete(clientMsgId);
+          const local = apiMessageToLocal(saved, myUserId || saved.senderId);
+          updateChat(chatId, (chat) => ({
+            ...chat,
+            messages: mergeMessages(chat.messages, [local]),
+            lastSyncedSeq: Math.max(chat.lastSyncedSeq ?? 0, saved.seq ?? 0),
+            nextSeq: Math.max(chat.nextSeq ?? 0, saved.seq ?? 0),
+          }));
+        } catch (e) {
+          markFailed(chatId, clientMsgId, e);
+        }
+      });
+    },
+    [ensureUploaded, enqueueSend, markFailed, myUserId, updateChat],
   );
 
   const sendMessage = useCallback(
-    (chatId: string, payload: SendPayload | string) => {
-      // Normalise legacy `sendMessage(chatId, 'hi')` calls.
+    async (chatId: string, payload: SendPayload | string) => {
       const p: SendPayload =
         typeof payload === 'string' ? { kind: 'text', text: payload } : payload;
-
       const kind: ChatMessageKind = p.kind ?? 'text';
       const text = (p.text ?? '').trim();
-
-      // Drop empties — but only for text messages. Image / audio messages
-      // are valid even without a text body.
       if (kind === 'text' && !text) return;
 
-      const msgId = `m_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const clientMsgId = newRequestId();
+      pendingPayloads.current.set(clientMsgId, { ...p, text });
+
       const optimistic: ChatMessage = {
-        id: msgId,
+        id: `local_${clientMsgId}`,
+        clientMsgId,
         authorId: 'me',
         kind,
-        text,
+        text: kind === 'text' ? text : kind,
         imageUri: p.imageUri,
         audioUri: p.audioUri,
         audioDurationMs: p.audioDurationMs,
         mediaKey: p.mediaKey,
-        replyToMessageId: p.replyToMessageId,
-        // view-once only meaningful for media kinds
-        viewOnce: p.viewOnce && kind !== 'text' ? true : undefined,
         createdAt: nowIso(),
         status: 'sending',
+        replyToMessageId: p.replyToMessageId,
+        viewOnce: p.viewOnce,
       };
-
       updateChat(chatId, (chat) => ({
         ...chat,
         messages: [...chat.messages, optimistic],
       }));
-
-      // Fake the delivered → seen → typing → reply pipeline so the UI's
-      // status flow is fully demoable without a real backend.
-      const t1 = setTimeout(() => {
-        updateMessage(chatId, msgId, (m) => ({ ...m, status: 'sent' }));
-      }, 250);
-
-      const t2 = setTimeout(() => {
-        updateMessage(chatId, msgId, (m) => ({ ...m, status: 'delivered' }));
-      }, 900);
-
-      const t3 = setTimeout(() => {
-        updateMessage(chatId, msgId, (m) => ({ ...m, status: 'seen' }));
-        updateChat(chatId, (chat) => ({ ...chat, partnerTyping: true }));
-      }, 1800);
-
-      const t4 = setTimeout(() => {
-        updateChat(chatId, (chat) => ({
-          ...chat,
-          partnerTyping: false,
-          messages: [
-            ...chat.messages,
-            {
-              id: `m_${Date.now()}_reply`,
-              authorId: chat.partner.id,
-              kind: 'text',
-              text: pickAutoReply(),
-              createdAt: nowIso(),
-              status: 'seen',
-            },
-          ],
-          unreadCount: chat.unreadCount + 1,
-        }));
-      }, 3500);
-
-      pendingTimers.current.push(t1, t2, t3, t4);
+      setTyping(chatId, false);
+      await deliver(chatId, clientMsgId);
     },
-    [updateChat, updateMessage],
+    [updateChat, deliver, setTyping],
+  );
+
+  const retryMessage = useCallback(
+    (chatId: string, clientMsgId: string) => {
+      if (!pendingPayloads.current.has(clientMsgId)) return;
+      updateChat(chatId, (chat) => {
+        const idx = chat.messages.findIndex((m) => m.clientMsgId === clientMsgId);
+        if (idx < 0) return chat;
+        // Move to the end: it will get the next seq on the server.
+        const msg: ChatMessage = {
+          ...chat.messages[idx],
+          status: 'sending',
+          createdAt: nowIso(),
+        };
+        const rest = chat.messages.filter((_, i) => i !== idx);
+        return { ...chat, messages: [...rest, msg] };
+      });
+      void deliver(chatId, clientMsgId);
+    },
+    [updateChat, deliver],
+  );
+
+  const discardMessage = useCallback(
+    (chatId: string, clientMsgId: string) => {
+      pendingPayloads.current.delete(clientMsgId);
+      updateChat(chatId, (chat) => ({
+        ...chat,
+        messages: chat.messages.filter(
+          (m) => !(m.clientMsgId === clientMsgId && m.status === 'failed'),
+        ),
+      }));
+    },
+    [updateChat],
   );
 
   const addReaction = useCallback(
     (chatId: string, messageId: string, emoji: string) => {
-      updateMessage(chatId, messageId, (m) => ({
-        ...m,
-        reaction: m.reaction === emoji ? undefined : emoji,
+      const msg = findChat(chatId)?.messages.find((m) => m.id === messageId);
+      const removing = msg?.reaction === emoji;
+      updateChat(chatId, (chat) => ({
+        ...chat,
+        messages: chat.messages.map((m) =>
+          m.id === messageId ? { ...m, reaction: removing ? undefined : emoji } : m,
+        ),
       }));
+      void (removing
+        ? removeChatReaction(chatId, messageId)
+        : setChatReaction(chatId, messageId, emoji)
+      ).catch(() => {});
     },
-    [updateMessage],
+    [findChat, updateChat],
   );
 
   const editMessage = useCallback(
     (chatId: string, messageId: string, newText: string) => {
       const trimmed = newText.trim();
       if (!trimmed) return;
-      updateMessage(chatId, messageId, (m) => ({
-        ...m,
-        text: trimmed,
-        editedAt: nowIso(),
+      updateChat(chatId, (chat) => ({
+        ...chat,
+        messages: chat.messages.map((m) =>
+          m.id === messageId ? { ...m, text: trimmed, editedAt: nowIso() } : m,
+        ),
       }));
+      void editChatMessage(chatId, messageId, trimmed).catch(() => {});
     },
-    [updateMessage],
+    [updateChat],
   );
 
-  /** Soft-delete — keeps the message in place so reply-quotes that point
-   *  to it still render, but renders the body as "Unsent". */
   const deleteMessage = useCallback(
     (chatId: string, messageId: string) => {
-      updateMessage(chatId, messageId, (m) => ({
-        ...m,
-        deletedAt: nowIso(),
+      updateChat(chatId, (chat) => ({
+        ...chat,
+        messages: chat.messages.map((m) =>
+          m.id === messageId ? { ...m, text: '', deletedAt: nowIso() } : m,
+        ),
+      }));
+      void deleteChatMessage(chatId, messageId, 'everyone').catch(() => {});
+    },
+    [updateChat],
+  );
+
+  const markViewedLocally = useCallback(
+    (chatId: string, messageId: string, viewedAt: string) => {
+      updateChat(chatId, (chat) => ({
+        ...chat,
+        messages: chat.messages.map((m) =>
+          m.id === messageId && !m.viewedAt ? { ...m, viewedAt } : m,
+        ),
       }));
     },
-    [updateMessage],
-  );
-
-  /** Mark a view-once message as viewed. Idempotent — second call is a
-   *  no-op so we don't keep updating the timestamp. */
-  const markViewed = useCallback(
-    (chatId: string, messageId: string) => {
-      updateMessage(chatId, messageId, (m) =>
-        m.viewedAt ? m : { ...m, viewedAt: nowIso() },
-      );
-    },
-    [updateMessage],
-  );
-
-  // ── Per-thread management ─────────────────────────────────────────
-  const pinChat = useCallback(
-    (chatId: string) => {
-      updateChat(chatId, (chat) => ({ ...chat, pinnedAt: nowIso() }));
-    },
     [updateChat],
   );
 
-  const unpinChat = useCallback(
-    (chatId: string) => {
-      updateChat(chatId, (chat) => ({ ...chat, pinnedAt: undefined }));
+  /** Opens a view-once message (recipient). Returns the one-time media URL,
+   *  or null if it can't be opened (already viewed / offline). */
+  const openViewOnce = useCallback(
+    async (chatId: string, messageId: string): Promise<string | null> => {
+      try {
+        const res = await openViewOnceApi(chatId, messageId);
+        markViewedLocally(chatId, messageId, res.viewedAt);
+        return res.url;
+      } catch (e) {
+        if (e instanceof ApiError && e.code === 'ALREADY_VIEWED') {
+          markViewedLocally(chatId, messageId, nowIso());
+        } else {
+          Alert.alert('Could not open', 'Check your connection and try again.');
+        }
+        return null;
+      }
     },
-    [updateChat],
+    [markViewedLocally],
   );
 
-  const deleteChat = useCallback((chatId: string) => {
-    setChats((prev) => prev.filter((c) => c.id !== chatId));
-  }, []);
+  const setPinned = useCallback(
+    (chatId: string, pinned: boolean) => {
+      const before = findChat(chatId)?.pinnedAt;
+      updateChat(chatId, (chat) => ({
+        ...chat,
+        pinnedAt: pinned ? nowIso() : undefined,
+      }));
+      setChatPinned(chatId, pinned).catch(() => {
+        updateChat(chatId, (chat) => ({ ...chat, pinnedAt: before }));
+        Alert.alert(
+          pinned ? 'Could not pin chat' : 'Could not unpin chat',
+          'Check your connection and try again.',
+        );
+      });
+    },
+    [findChat, updateChat],
+  );
+
+  const pinChat = useCallback((chatId: string) => setPinned(chatId, true), [setPinned]);
+  const unpinChat = useCallback((chatId: string) => setPinned(chatId, false), [setPinned]);
+
+  const deleteChat = useCallback(
+    (chatId: string) => {
+      const key = normChatId(chatId);
+      const removed = findChat(chatId);
+      setChats((prev) => prev.filter((c) => normChatId(c.id) !== key));
+      deleteChatApi(chatId).catch(() => {
+        if (removed) {
+          setChats((prev) =>
+            prev.some((c) => normChatId(c.id) === key) ? prev : [removed, ...prev],
+          );
+        }
+        Alert.alert('Could not delete chat', 'Check your connection and try again.');
+      });
+    },
+    [findChat, setChats],
+  );
+
+  /** Blocks/unblocks a person (by user id); updates every chat with them. */
+  const setUserBlockedState = useCallback(
+    async (userId: string, blocked: boolean) => {
+      const apply = (value: boolean) =>
+        setChats((prev) => {
+          let changed = false;
+          const next = prev.map((chat) => {
+            if (chat.partner.id !== userId || !!chat.isBlocked === value) return chat;
+            changed = true;
+            return {
+              ...chat,
+              isBlocked: value,
+              partnerTyping: value ? false : chat.partnerTyping,
+              partner: value ? { ...chat.partner, onlineNow: false } : chat.partner,
+            };
+          });
+          return changed ? next : prev;
+        });
+      apply(blocked);
+      try {
+        await setUserBlocked(userId, blocked);
+        if (!blocked) void refresh();
+      } catch (e) {
+        apply(!blocked);
+        Alert.alert(
+          blocked ? 'Could not block' : 'Could not unblock',
+          'Check your connection and try again.',
+        );
+        throw e;
+      }
+    },
+    [setChats, refresh],
+  );
 
   const blockChat = useCallback(
     (chatId: string) => {
-      updateChat(chatId, (chat) => ({
-        ...chat,
-        isBlocked: true,
-        partnerTyping: false,
-      }));
+      const partnerId = findChat(chatId)?.partner.id;
+      if (partnerId) void setUserBlockedState(partnerId, true).catch(() => {});
     },
-    [updateChat],
+    [findChat, setUserBlockedState],
   );
 
   const unblockChat = useCallback(
     (chatId: string) => {
-      updateChat(chatId, (chat) => ({ ...chat, isBlocked: false }));
+      const partnerId = findChat(chatId)?.partner.id;
+      if (partnerId) void setUserBlockedState(partnerId, false).catch(() => {});
     },
-    [updateChat],
+    [findChat, setUserBlockedState],
   );
 
-  const getChat = useCallback(
-    (chatId: string) => chats.find((c) => c.id === chatId),
-    [chats],
-  );
+  const subscribeIncoming = useCallback((fn: IncomingListener) => {
+    incomingListeners.current.add(fn);
+    return () => {
+      incomingListeners.current.delete(fn);
+    };
+  }, []);
 
   const value = useMemo<ChatsContextValue>(
     () => ({
       chats,
+      loading,
+      refresh,
       getChat,
+      loadMessages,
+      loadOlderMessages,
+      syncChatDelta,
       acceptPlane,
       sendMessage,
+      retryMessage,
+      discardMessage,
       editMessage,
       deleteMessage,
-      markViewed,
+      openViewOnce,
       markChatOpened,
+      setActiveChat,
+      setTyping,
       addReaction,
       pinChat,
       unpinChat,
       deleteChat,
       blockChat,
       unblockChat,
+      setUserBlockedState,
+      subscribeIncoming,
+      loaded,
     }),
     [
       chats,
+      loading,
+      refresh,
       getChat,
+      loadMessages,
+      loadOlderMessages,
+      syncChatDelta,
       acceptPlane,
       sendMessage,
+      retryMessage,
+      discardMessage,
       editMessage,
       deleteMessage,
-      markViewed,
+      openViewOnce,
       markChatOpened,
+      setActiveChat,
+      setTyping,
       addReaction,
       pinChat,
       unpinChat,
       deleteChat,
       blockChat,
       unblockChat,
+      setUserBlockedState,
+      subscribeIncoming,
+      loaded,
     ],
   );
 
-  return <ChatsContext.Provider value={value}>{children}</ChatsContext.Provider>;
+  return (
+    <ChatsContext.Provider value={value}>
+      {children}
+      {status === 'signed-in' ? <InAppMessageBanner /> : null}
+    </ChatsContext.Provider>
+  );
 }
 
 export function useChats(): ChatsContextValue {

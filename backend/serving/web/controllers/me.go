@@ -27,7 +27,7 @@ type patchMeBody struct {
 func Me(w http.ResponseWriter, r *http.Request) {
 	accountID, ok := bearer.UserIDFromContext(r.Context())
 	if !ok {
-		httpx.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Not signed in.")
+		httpx.Error(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "Not signed in.")
 		return
 	}
 	u, err := common.Auth.GetMe(r.Context(), accountID)
@@ -41,18 +41,18 @@ func Me(w http.ResponseWriter, r *http.Request) {
 func PatchMe(w http.ResponseWriter, r *http.Request) {
 	accountID, ok := bearer.UserIDFromContext(r.Context())
 	if !ok {
-		httpx.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Not signed in.")
+		httpx.Error(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "Not signed in.")
 		return
 	}
 	var body patchMeBody
 	if err := httpx.DecodeJSONLenient(r, &body); err != nil {
-		httpx.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body.")
+		httpx.Error(w, r, http.StatusBadRequest, "INVALID_BODY", "Invalid request body.")
 		return
 	}
 	if body.AvatarURL != nil && common.R2 != nil {
 		if err := r2storage.ValidateAvatarURL(*body.AvatarURL, common.R2.PublicBaseURL()); err != nil {
 			if errors.Is(err, r2storage.ErrInvalidAvatarURL) {
-				httpx.Error(w, http.StatusBadRequest, "INVALID_INPUT", "Invalid avatar URL.")
+				httpx.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", "Invalid avatar URL.")
 				return
 			}
 			writeServiceError(w, r, "auth.patch_me.avatar", err)
@@ -82,7 +82,7 @@ func PatchMe(w http.ResponseWriter, r *http.Request) {
 func DeleteMe(w http.ResponseWriter, r *http.Request) {
 	accountID, ok := bearer.UserIDFromContext(r.Context())
 	if !ok {
-		httpx.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Not signed in.")
+		httpx.Error(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "Not signed in.")
 		return
 	}
 	if err := common.Auth.DeleteAccount(r.Context(), accountID); err != nil {

@@ -9,9 +9,8 @@
 import { Ionicons } from '@/lib/native/vector-icons';
 import * as Haptics from '@/lib/native/haptics';
 import { useRouter } from '@/lib/router';
-import { useCallback, useMemo, useState } from 'react';
+import { memo, useCallback, useMemo, useState } from 'react';
 import {
-  FlatList,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -19,17 +18,20 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import Animated from 'react-native-reanimated';
+import Animated, { FadeIn, LinearTransition } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { Avatar } from '@/components/avatar';
 import { ChatActionMenu } from '@/components/chat-action-menu';
+import { ChatListSkeleton } from '@/components/chat-list-skeleton';
 import { SwipeSafePressable } from '@/components/swipe-safe-pressable';
 import { TabNavHeader } from '@/components/tab-nav-header';
 import { TabSwipeRegion } from '@/components/tab-swipe-region';
 import { ThemedText } from '@/components/themed-text';
 import { Colors, Radii, Spacing } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { useRealtimeConnected } from '@/hooks/use-realtime-connected';
+import { useRefreshOnFocus } from '@/hooks/use-refresh-on-focus';
 import { useTabFocusFade } from '@/hooks/use-tab-focus-fade';
 import { useChats } from '@/lib/chats-context';
 import { useUserSettings } from '@/lib/user-settings-context';
@@ -39,9 +41,12 @@ export default function ChatsScreen() {
   const scheme = useColorScheme() ?? 'light';
   const c = Colors[scheme];
   const router = useRouter();
-  const { chats } = useChats();
+  const { chats, refresh: refreshChats, loaded } = useChats();
+  const connected = useRealtimeConnected();
   const { user } = useUserSettings();
   const fadeStyle = useTabFocusFade();
+
+  useRefreshOnFocus(refreshChats);
 
   // Story entry — pushes the full-screen `/status` route where the
   // user can add or edit their status.
@@ -59,8 +64,35 @@ export default function ChatsScreen() {
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    await new Promise<void>((resolve) => setTimeout(resolve, 650));
-    setRefreshing(false);
+    try {
+      await refreshChats();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [refreshChats]);
+
+  const openChat = useCallback(
+    (chat: Chat) => {
+      router.push(`/chat/${chat.id}`);
+    },
+    [router],
+  );
+
+  const openPartner = useCallback(
+    (chat: Chat) => {
+      Haptics.selectionAsync();
+      if (!chat.isBlocked && chat.partner.hasStatus) {
+        router.push(`/story/${chat.partner.id}`);
+      } else {
+        router.push(`/profile/${chat.partner.id}`);
+      }
+    },
+    [router],
+  );
+
+  const openActions = useCallback((chat: Chat) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    setActionChatId(chat.id);
   }, []);
 
   // Sort: pinned chats first (newest pin on top), then by last-message
@@ -104,12 +136,16 @@ export default function ChatsScreen() {
     <Animated.View style={fadeStyle}>
       <TabNavHeader route="/chats">
         <View style={styles.titleRow}>
-          <ThemedText style={styles.title}>Chats</ThemedText>
-          <View style={[styles.pill, { backgroundColor: c.surfaceAlt }]}>
-            <ThemedText style={[styles.pillText, { color: c.textMuted }]}>
-              {chats.length}
-            </ThemedText>
-          </View>
+          <ThemedText style={styles.title}>
+            {!connected && loaded ? 'Connecting…' : 'Chats'}
+          </ThemedText>
+          {connected || !loaded ? (
+            <View style={[styles.pill, { backgroundColor: c.surfaceAlt }]}>
+              <ThemedText style={[styles.pillText, { color: c.textMuted }]}>
+                {chats.length}
+              </ThemedText>
+            </View>
+          ) : null}
         </View>
 
         <Pressable
@@ -152,7 +188,12 @@ export default function ChatsScreen() {
         style={styles.fill}
         withNativeScroll
       >
-      {chats.length === 0 ? (
+      {!loaded && chats.length === 0 ? (
+        <ScrollView style={styles.fill} scrollEnabled={false}>
+          {chatsHeader}
+          <ChatListSkeleton />
+        </ScrollView>
+      ) : chats.length === 0 ? (
         <ScrollView
           style={styles.fill}
           contentContainerStyle={styles.emptyScroll}
@@ -187,9 +228,10 @@ export default function ChatsScreen() {
           </View>
         </ScrollView>
       ) : (
-        <FlatList
+        <Animated.FlatList
           style={styles.fill}
           data={visibleChats}
+          itemLayoutAnimation={LinearTransition.duration(220)}
           keyExtractor={(item) => item.id}
           showsVerticalScrollIndicator
           keyboardShouldPersistTaps="handled"
@@ -239,34 +281,9 @@ export default function ChatsScreen() {
           renderItem={({ item }) => (
             <ChatRow
               chat={item}
-              onPress={() => {
-                if (item.isBlocked) {
-                  Haptics.notificationAsync(
-                    Haptics.NotificationFeedbackType.Warning,
-                  );
-                  setActionChatId(item.id);
-                  return;
-                }
-                router.push(`/chat/${item.id}`);
-              }}
-              onAvatarPress={() => {
-                if (item.isBlocked) {
-                  Haptics.notificationAsync(
-                    Haptics.NotificationFeedbackType.Warning,
-                  );
-                  return;
-                }
-                Haptics.selectionAsync();
-                if (item.partner.hasStatus) {
-                  router.push(`/story/${item.partner.id}`);
-                } else {
-                  router.push(`/profile/${item.partner.id}`);
-                }
-              }}
-              onLongPress={() => {
-                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-                setActionChatId(item.id);
-              }}
+              onPress={openChat}
+              onAvatarPress={openPartner}
+              onLongPress={openActions}
             />
           )}
           ItemSeparatorComponent={() => (
@@ -299,16 +316,16 @@ export default function ChatsScreen() {
   );
 }
 
-function ChatRow({
+const ChatRow = memo(function ChatRow({
   chat,
   onPress,
   onAvatarPress,
   onLongPress,
 }: {
   chat: Chat;
-  onPress: () => void;
-  onAvatarPress: () => void;
-  onLongPress: () => void;
+  onPress: (chat: Chat) => void;
+  onAvatarPress: (chat: Chat) => void;
+  onLongPress: (chat: Chat) => void;
 }) {
   const scheme = useColorScheme() ?? 'light';
   const c = Colors[scheme];
@@ -341,10 +358,13 @@ function ChatRow({
   } else {
     previewBody = lastMessage.text;
   }
-  const preview = lastMessage && lastFromMe
-    ? `You: ${previewBody}`
-    : previewBody;
-  const ts = lastMessage ? timeAgo(lastMessage.createdAt) : '';
+  const preview = previewBody;
+  const ts = formatListTime(lastMessage?.createdAt ?? chat.createdAt);
+  const unread = chat.unreadCount > 0 && !isBlocked;
+  const tick =
+    lastMessage && lastFromMe && !lastMessage.deletedAt && !isBlocked
+      ? lastMessage.status
+      : null;
 
   // Why two sibling Pressables instead of one wrapper?
   // The user wants the avatar circle to be a separate hit target so
@@ -354,10 +374,13 @@ function ChatRow({
   // is duplicated on both so the action menu still opens from
   // anywhere on the row.
   return (
-    <View style={[styles.row, isBlocked && { opacity: 0.55 }]}>
+    <Animated.View
+      entering={FadeIn.duration(180)}
+      style={[styles.row, isBlocked && { opacity: 0.55 }]}
+    >
       <SwipeSafePressable
-        onPress={onAvatarPress}
-        onLongPress={onLongPress}
+        onPress={() => onAvatarPress(chat)}
+        onLongPress={() => onLongPress(chat)}
         delayLongPress={320}
         style={styles.avatarHit}
       >
@@ -371,8 +394,8 @@ function ChatRow({
       </SwipeSafePressable>
 
       <SwipeSafePressable
-        onPress={onPress}
-        onLongPress={onLongPress}
+        onPress={() => onPress(chat)}
+        onLongPress={() => onLongPress(chat)}
         delayLongPress={320}
         style={styles.rowContent}
       >
@@ -387,19 +410,46 @@ function ChatRow({
             {isBlocked ? (
               <Ionicons name="ban-outline" size={14} color={c.danger} />
             ) : null}
-            <ThemedText style={[styles.rowTime, { color: c.textMuted }]}>
+            <ThemedText
+              style={[styles.rowTime, { color: unread ? c.tint : c.textMuted }]}
+            >
               {ts}
             </ThemedText>
           </View>
 
           <View style={styles.rowBottom}>
+            {tick && !chat.partnerTyping ? (
+              <Ionicons
+                name={
+                  tick === 'failed'
+                    ? 'alert-circle'
+                    : tick === 'sending'
+                      ? 'time-outline'
+                      : tick === 'sent'
+                        ? 'checkmark'
+                        : 'checkmark-done'
+                }
+                size={15}
+                color={
+                  tick === 'failed'
+                    ? c.danger
+                    : tick === 'seen'
+                      ? '#3B82F6'
+                      : c.textMuted
+                }
+              />
+            ) : null}
             <ThemedText
               numberOfLines={1}
               style={[
                 styles.rowPreview,
                 {
-                  color: chat.unreadCount > 0 && !isBlocked ? c.text : c.textMuted,
-                  fontWeight: chat.unreadCount > 0 && !isBlocked ? '600' : '400',
+                  color: chat.partnerTyping && !isBlocked
+                    ? c.tint
+                    : unread
+                      ? c.text
+                      : c.textMuted,
+                  fontWeight: unread ? '600' : '400',
                 },
               ]}
             >
@@ -409,10 +459,10 @@ function ChatRow({
                   ? 'typing…'
                   : preview}
             </ThemedText>
-            {chat.unreadCount > 0 && !isBlocked ? (
+            {unread ? (
               <View style={[styles.unreadBadge, { backgroundColor: c.tint }]}>
                 <ThemedText style={styles.unreadBadgeText}>
-                  {chat.unreadCount}
+                  {chat.unreadCount > 99 ? '99+' : chat.unreadCount}
                 </ThemedText>
               </View>
             ) : null}
@@ -421,11 +471,28 @@ function ChatRow({
 
         <Ionicons name="chevron-forward" size={18} color={c.textSubtle} />
       </SwipeSafePressable>
-    </View>
+    </Animated.View>
   );
+});
+
+/** WhatsApp-style list timestamp: 14:05 · Yesterday · Mon · 12/03/26 */
+function formatListTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const dayMs = 24 * 3600 * 1000;
+  if (d >= startOfToday) {
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+  if (d.getTime() >= startOfToday.getTime() - dayMs) return 'Yesterday';
+  if (d.getTime() >= startOfToday.getTime() - 6 * dayMs) {
+    return d.toLocaleDateString([], { weekday: 'short' });
+  }
+  return d.toLocaleDateString([], { day: '2-digit', month: '2-digit', year: '2-digit' });
 }
 
-function timeAgo(iso: string): string {
+export function timeAgo(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
   const mins = Math.round(ms / 60000);
   if (mins < 1) return 'now';

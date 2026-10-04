@@ -13,12 +13,15 @@ export type ChatMessageStatus =
   | 'sending' // optimistic, not yet "delivered" by the mock layer
   | 'sent' // single tick
   | 'delivered' // double tick (gray)
-  | 'seen'; // double tick (blue)
+  | 'seen' // double tick (blue)
+  | 'failed'; // send failed — tap to retry
 
 export type ChatMessageKind = 'text' | 'image' | 'audio';
 
 export type ChatMessage = {
   id: string;
+  seq?: number;
+  clientMsgId?: string;
   /** Sender of this individual message. `'me'` for the local user,
    *  otherwise the partner's user id. */
   authorId: 'me' | string;
@@ -60,6 +63,15 @@ export type ChatMessage = {
 
 export type Chat = {
   id: string;
+  /** Server seq cursor (chats.next_seq). */
+  nextSeq?: number;
+  /** Highest seq loaded locally for delta sync. */
+  lastSyncedSeq?: number;
+  /** True once the latest page of history was fetched (not just the
+   *  list-preview message). */
+  historyLoaded?: boolean;
+  /** False once paging backwards reached the first message. */
+  hasOlder?: boolean;
   /** The other person in this chat. */
   partner: Sender;
   /** Full message log, oldest first. */

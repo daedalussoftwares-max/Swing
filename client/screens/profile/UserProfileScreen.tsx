@@ -1,46 +1,223 @@
 /**
- * Public profile screen for another user (a sender of a plane, or a chat
- * partner). Opens from an avatar tap on the home card or in the chat
- * header.
+ * Public profile of another user (plane sender, chat partner, outbox
+ * recipient, notification deep link…).
  *
- * Data is hard-coded via `findSenderById`; once Firestore is wired up
- * this becomes a `doc(users, uid)` read.
+ * Renders instantly from whatever we already know (inbox cache / chat
+ * partner) and then refreshes from GET /v1/users/{id}, so it works on a
+ * cold start and for people we have no local data about.
  */
 
 import { Ionicons } from '@/lib/native/vector-icons';
 import { Image } from '@/lib/native/image';
+import * as Haptics from '@/lib/native/haptics';
 import { useLocalSearchParams, useRouter } from '@/lib/router';
-import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { useCallback, useEffect, useState } from 'react';
+import {
+  ActivityIndicator,
+  Alert,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  View,
+} from 'react-native';
+import Animated, { FadeIn } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { ActionSheet, type ActionSheetItem } from '@/components/action-sheet';
+import { ReportSheet } from '@/components/report-sheet';
 import { ThemedText } from '@/components/themed-text';
 import { Colors, Radii, Spacing } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import { type ApiPublicProfile, getUserProfile } from '@/lib/api/chats-api';
+import { ApiError } from '@/lib/api/client';
+import { useAuth } from '@/lib/auth-context';
 import { getInitials } from '@/lib/initials';
-import { findSenderById } from '@/lib/mock-planes';
+import { useChats } from '@/lib/chats-context';
+import { lookupSender } from '@/lib/planes-mapper';
+import { useInboxPlanes } from '@/lib/inbox-planes-context';
+
+type ViewModel = {
+  id: string;
+  name: string;
+  username?: string;
+  avatarUrl?: string;
+  bio?: string;
+  interests: string[];
+  age?: number;
+  gender?: string;
+  city?: string;
+  country?: string;
+  joinedAt?: string;
+  lastActiveAt?: string;
+  online: boolean;
+  chatId?: string;
+  blockedByMe: boolean;
+};
+
+const GENDER_LABEL: Record<string, string> = {
+  M: 'Male',
+  F: 'Female',
+  NB: 'Non-binary',
+  male: 'Male',
+  female: 'Female',
+  'non-binary': 'Non-binary',
+};
+
+function fromApi(p: ApiPublicProfile): ViewModel {
+  return {
+    id: p.id,
+    name: p.name,
+    username: p.username,
+    avatarUrl: p.avatarUrl,
+    bio: p.bio,
+    interests: p.interests ?? [],
+    age: p.age,
+    gender: p.gender,
+    city: p.city,
+    country: p.country,
+    joinedAt: p.joinedAt,
+    lastActiveAt: p.lastActiveAt,
+    online: p.online,
+    chatId: p.chatId,
+    blockedByMe: p.blockedByMe,
+  };
+}
 
 export default function UserProfileScreen() {
   const { userId } = useLocalSearchParams<{ userId: string }>();
   const scheme = useColorScheme() ?? 'light';
   const c = Colors[scheme];
   const router = useRouter();
+  const auth = useAuth();
 
-  const user = userId ? findSenderById(userId) : undefined;
+  const { profileCache } = useInboxPlanes();
+  const { chats, setUserBlockedState } = useChats();
+  const chat = userId ? chats.find((x) => x.partner.id === userId) : undefined;
+  const cached = userId ? (lookupSender(profileCache, userId) ?? chat?.partner) : undefined;
+
+  const [remote, setRemote] = useState<ViewModel | null>(null);
+  const [error, setError] = useState<'not-found' | 'failed' | null>(null);
+  const [showMenu, setShowMenu] = useState(false);
+  const [reporting, setReporting] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!userId || auth.status !== 'signed-in') return;
+    setError(null);
+    try {
+      setRemote(fromApi(await getUserProfile(userId)));
+    } catch (e) {
+      setError(e instanceof ApiError && e.httpStatus === 404 ? 'not-found' : 'failed');
+    }
+  }, [userId, auth.status]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const fallback: ViewModel | null = cached
+    ? {
+        id: cached.id,
+        name: cached.name,
+        avatarUrl: cached.avatarUrl,
+        bio: cached.bio,
+        interests: cached.interests ?? [],
+        city: cached.city,
+        country: cached.country,
+        joinedAt: cached.joinedAt,
+        lastActiveAt: cached.lastSeenAt,
+        online: !!cached.onlineNow,
+        chatId: chat?.id,
+        blockedByMe: !!chat?.isBlocked,
+      }
+    : null;
+  const user = remote ?? fallback;
+  // Live chat state (block toggles, presence) wins over the fetched copy.
+  const blocked = chat ? !!chat.isBlocked : !!user?.blockedByMe;
+  const online = !blocked && (chat ? !!chat.partner.onlineNow : !!user?.online);
+  const chatId = chat?.id ?? user?.chatId;
+  const isMe = !!userId && userId === auth.user?.id;
 
   if (!user) {
     return (
       <SafeAreaView style={[styles.root, { backgroundColor: c.background }]}>
         <View style={styles.notFound}>
-          <ThemedText style={styles.notFoundText}>User not found.</ThemedText>
-          <Pressable onPress={() => router.back()}>
-            <ThemedText style={{ color: c.tint, marginTop: Spacing.md }}>
-              Go back
-            </ThemedText>
-          </Pressable>
+          {error ? (
+            <>
+              <ThemedText style={styles.notFoundText}>
+                {error === 'not-found' ? 'User not found.' : "Couldn't load this profile."}
+              </ThemedText>
+              {error === 'failed' ? (
+                <Pressable onPress={() => void load()}>
+                  <ThemedText style={{ color: c.tint, marginTop: Spacing.md }}>
+                    Try again
+                  </ThemedText>
+                </Pressable>
+              ) : null}
+              <Pressable onPress={() => router.back()}>
+                <ThemedText style={{ color: c.textMuted, marginTop: Spacing.md }}>
+                  Go back
+                </ThemedText>
+              </Pressable>
+            </>
+          ) : (
+            <ActivityIndicator color={c.tint} />
+          )}
         </View>
       </SafeAreaView>
     );
   }
+
+  const toggleBlock = () => {
+    setShowMenu(false);
+    if (blocked) {
+      void setUserBlockedState(user.id, false)
+        .then(() => setRemote((r) => (r ? { ...r, blockedByMe: false } : r)))
+        .catch(() => {});
+      return;
+    }
+    Alert.alert(
+      `Block ${user.name}?`,
+      "You won't receive their messages or planes, and they won't see when you're online. They won't be notified.",
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Block',
+          style: 'destructive',
+          onPress: () => {
+            Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+            void setUserBlockedState(user.id, true)
+              .then(() => setRemote((r) => (r ? { ...r, blockedByMe: true, online: false } : r)))
+              .catch(() => {});
+          },
+        },
+      ],
+    );
+  };
+
+  const menuItems: ActionSheetItem[] = [
+    {
+      id: 'block',
+      icon: blocked ? 'lock-open-outline' : 'ban-outline',
+      label: blocked ? `Unblock ${user.name}` : `Block ${user.name}`,
+      destructive: !blocked,
+      onPress: toggleBlock,
+    },
+    {
+      id: 'report',
+      icon: 'flag-outline',
+      label: 'Report',
+      onPress: () => {
+        setShowMenu(false);
+        setReporting(true);
+      },
+    },
+  ];
+
+  const meta = [
+    user.age != null ? String(user.age) : null,
+    user.gender ? (GENDER_LABEL[user.gender] ?? user.gender) : null,
+    [user.city, user.country].filter(Boolean).join(', ') || null,
+  ].filter(Boolean);
 
   return (
     <SafeAreaView
@@ -65,18 +242,21 @@ export default function UserProfileScreen() {
         >
           <Ionicons name="chevron-back" size={22} color={c.text} />
         </Pressable>
-        <Pressable
-          hitSlop={16}
-          style={({ pressed }) => [
-            styles.moreButton,
-            {
-              backgroundColor: c.surfaceAlt,
-              opacity: pressed ? 0.7 : 1,
-            },
-          ]}
-        >
-          <Ionicons name="ellipsis-horizontal" size={20} color={c.text} />
-        </Pressable>
+        {!isMe ? (
+          <Pressable
+            hitSlop={16}
+            onPress={() => setShowMenu(true)}
+            style={({ pressed }) => [
+              styles.moreButton,
+              {
+                backgroundColor: c.surfaceAlt,
+                opacity: pressed ? 0.7 : 1,
+              },
+            ]}
+          >
+            <Ionicons name="ellipsis-horizontal" size={20} color={c.text} />
+          </Pressable>
+        ) : null}
       </View>
 
       <ScrollView
@@ -84,7 +264,7 @@ export default function UserProfileScreen() {
         showsVerticalScrollIndicator={false}
       >
         {/* Hero: large avatar + name + presence + meta */}
-        <View style={styles.hero}>
+        <Animated.View entering={FadeIn.duration(220)} style={styles.hero}>
           <View
             style={[
               styles.bigAvatar,
@@ -105,7 +285,7 @@ export default function UserProfileScreen() {
                 {getInitials(user.name)}
               </ThemedText>
             )}
-            {user.onlineNow ? (
+            {online ? (
               <View
                 style={[
                   styles.onlineDot,
@@ -116,24 +296,62 @@ export default function UserProfileScreen() {
           </View>
 
           <ThemedText style={styles.name}>{user.name}</ThemedText>
-          <ThemedText style={[styles.subname, { color: c.textMuted }]}>
-            {user.ageBadge} · {user.city ?? '—'}
-            {user.country ? `, ${user.country}` : ''}
-          </ThemedText>
+          {user.username ? (
+            <ThemedText style={[styles.subname, { color: c.textMuted }]}>
+              @{user.username}
+            </ThemedText>
+          ) : null}
+          {meta.length > 0 ? (
+            <ThemedText style={[styles.subname, { color: c.textMuted }]}>
+              {meta.join(' · ')}
+            </ThemedText>
+          ) : null}
 
-          {user.onlineNow ? (
+          {blocked ? (
+            <View style={styles.presenceRow}>
+              <Ionicons name="ban-outline" size={13} color={c.danger} />
+              <ThemedText style={[styles.presenceText, { color: c.danger }]}>
+                Blocked
+              </ThemedText>
+            </View>
+          ) : online ? (
             <View style={styles.presenceRow}>
               <View style={[styles.miniDot, { backgroundColor: c.success }]} />
               <ThemedText style={[styles.presenceText, { color: c.success }]}>
                 Online now
               </ThemedText>
             </View>
-          ) : user.lastSeenAt ? (
+          ) : user.lastActiveAt ? (
             <ThemedText style={[styles.presenceText, { color: c.textMuted }]}>
-              Last seen {timeAgo(user.lastSeenAt)}
+              Active {timeAgo(user.lastActiveAt)}
             </ThemedText>
           ) : null}
-        </View>
+
+          {!isMe && chatId && !blocked ? (
+            <Pressable
+              onPress={() => router.push(`/chat/${chatId}`)}
+              style={({ pressed }) => [
+                styles.primaryButton,
+                { backgroundColor: c.tint, opacity: pressed ? 0.85 : 1 },
+              ]}
+            >
+              <Ionicons name="chatbubble-ellipses" size={18} color="#fff" />
+              <ThemedText style={styles.primaryButtonText}>Message</ThemedText>
+            </Pressable>
+          ) : !isMe && blocked ? (
+            <Pressable
+              onPress={toggleBlock}
+              style={({ pressed }) => [
+                styles.secondaryButton,
+                { borderColor: c.tint, opacity: pressed ? 0.7 : 1 },
+              ]}
+            >
+              <ThemedText style={[styles.secondaryButtonText, { color: c.tint }]}>
+                Unblock
+              </ThemedText>
+            </Pressable>
+          ) : null}
+        </Animated.View>
 
         {/* Bio */}
         {user.bio ? (
@@ -151,7 +369,7 @@ export default function UserProfileScreen() {
         ) : null}
 
         {/* Interests */}
-        {user.interests && user.interests.length > 0 ? (
+        {user.interests.length > 0 ? (
           <View
             style={[
               styles.card,
@@ -193,9 +411,9 @@ export default function UserProfileScreen() {
         >
           <View style={styles.statsRow}>
             <Stat
-              icon="location-outline"
-              value={`${user.distanceKm} km`}
-              label="away"
+              icon="sparkles-outline"
+              value={String(user.interests.length)}
+              label="interests"
               color={c.tint}
               labelColor={c.textMuted}
             />
@@ -218,6 +436,24 @@ export default function UserProfileScreen() {
           </ThemedText>
         </View>
       </ScrollView>
+
+      <ActionSheet
+        visible={showMenu}
+        items={menuItems}
+        onClose={() => setShowMenu(false)}
+      />
+      <ReportSheet
+        visible={reporting}
+        userId={user.id}
+        userName={user.name}
+        chatId={chatId}
+        onClose={() => setReporting(false)}
+        onReported={(didBlock) => {
+          if (didBlock) {
+            setRemote((r) => (r ? { ...r, blockedByMe: true, online: false } : r));
+          }
+        }}
+      />
     </SafeAreaView>
   );
 }
@@ -344,6 +580,24 @@ const styles = StyleSheet.create({
     fontSize: 26,
     fontWeight: '700',
   },
+  primaryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    marginTop: Spacing.md,
+    paddingHorizontal: Spacing.xl,
+    paddingVertical: 12,
+    borderRadius: Radii.pill,
+  },
+  primaryButtonText: { color: '#fff', fontSize: 15, fontWeight: '700' },
+  secondaryButton: {
+    marginTop: Spacing.md,
+    paddingHorizontal: Spacing.xl,
+    paddingVertical: 10,
+    borderRadius: Radii.pill,
+    borderWidth: 1,
+  },
+  secondaryButtonText: { fontSize: 15, fontWeight: '600' },
   subname: {
     fontSize: 14,
     marginTop: 2,

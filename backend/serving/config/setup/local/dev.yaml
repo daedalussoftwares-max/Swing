@@ -4,8 +4,8 @@ app: serving
 
 server:
   port: "8080"
-  read_timeout: 15s
-  write_timeout: 15s
+  read_timeout: 60s
+  write_timeout: 60s
 
 database:
   url: ""
@@ -19,3 +19,6 @@ auth:
 cors:
   allowed_origins:
     - "*"
+
+logging:
+  debug_http: false

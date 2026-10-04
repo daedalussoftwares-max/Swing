@@ -23,8 +23,12 @@ export default function NotificationsScreen() {
   const scheme = useColorScheme() ?? 'light';
   const c = Colors[scheme];
   const router = useRouter();
-  const { notifications, markRead, markAllRead, dismiss, clearAll } =
+  const { notifications, markRead, markAllRead, dismiss, clearAll, refresh } =
     useNotifications();
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
 
   // Mark everything as read once the user lands here, mirroring how
   // Instagram clears the activity badge as soon as you open it.

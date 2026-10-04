@@ -1,41 +1,36 @@
 /**
- * Audio shim (replaces expo-audio).
+ * Voice-note recording + playback on top of react-native-nitro-sound.
+ *
+ * nitro-sound exposes ONE native player with ONE progress listener, so
+ * playback is modelled as a single shared "voice player": only one note
+ * plays at a time, starting another stops the previous one, and each
+ * bubble subscribes to it and re-renders only while it is the active one
+ * (no per-bubble polling timers).
  */
 import { useEffect, useRef, useState } from 'react';
 import { PermissionsAndroid, Platform } from 'react-native';
-import AudioRecorderPlayer from 'react-native-audio-recorder-player';
+import Sound from 'react-native-nitro-sound';
 
 export const RecordingPresets = { HIGH_QUALITY: {} };
-
-type PlayerStatus = {
-  playing: boolean;
-  currentTime: number;
-  duration: number;
-  didJustFinish: boolean;
-};
-
-type AudioPlayer = {
-  play: () => Promise<void>;
-  pause: () => Promise<void>;
-  seekTo: (seconds: number) => Promise<void>;
-  getStatus: () => PlayerStatus;
-};
-
-const defaultStatus: PlayerStatus = {
-  playing: false,
-  currentTime: 0,
-  duration: 0,
-  didJustFinish: false,
-};
 
 export async function setAudioModeAsync(_options: {
   allowsRecording?: boolean;
   playsInSilentMode?: boolean;
 }): Promise<void> {
-  // expo-audio toggled AVAudioSession on iOS; native recording lib handles session setup.
+  // nitro-sound configures the audio session itself.
 }
 
 export const AudioModule = {
+  /** Current mic permission without prompting. */
+  async getRecordingPermissionsAsync(): Promise<{ granted: boolean }> {
+    if (Platform.OS === 'android') {
+      const granted = await PermissionsAndroid.check(
+        PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+      );
+      return { granted };
+    }
+    return { granted: true };
+  },
   async requestRecordingPermissionsAsync(): Promise<{ granted: boolean }> {
     if (Platform.OS === 'android') {
       const granted = await PermissionsAndroid.request(
@@ -47,18 +42,35 @@ export const AudioModule = {
   },
 };
 
+// ── Recording ──────────────────────────────────────────────────────────
+
 export function useAudioRecorder(_preset: unknown) {
   const uriRef = useRef<string | null>(null);
+  const startedRef = useRef<Promise<string> | null>(null);
 
   return {
-    async prepareToRecordAsync() {},
+    async prepareToRecordAsync() {
+      // Recording and playback share the native session; stop any note.
+      await voicePlayer.stop();
+    },
     async record() {
-      await AudioRecorderPlayer.startRecorder();
+      uriRef.current = null;
+      // nitro-sound writes to a unique file (sound_<ts>.mp4, AAC) when no
+      // path is given. Keep the promise so stop() can't race the start.
+      startedRef.current = Sound.startRecorder();
+      await startedRef.current;
     },
     async stop() {
-      const uri = await AudioRecorderPlayer.stopRecorder();
-      uriRef.current = uri;
-      return { uri };
+      try {
+        await startedRef.current;
+      } catch {
+        /* start failed; stopRecorder will reject too */
+      }
+      startedRef.current = null;
+      const uri = await Sound.stopRecorder();
+      // Guard against the library's sentinel strings.
+      uriRef.current = uri && uri.includes('/') ? uri : null;
+      return { uri: uriRef.current };
     },
     get uri() {
       return uriRef.current;
@@ -66,44 +78,158 @@ export function useAudioRecorder(_preset: unknown) {
   };
 }
 
-export function useAudioPlayer(source: { uri: string }): AudioPlayer {
-  const statusRef = useRef<PlayerStatus>(defaultStatus);
+// ── Playback ───────────────────────────────────────────────────────────
 
-  useEffect(() => {
-    AudioRecorderPlayer.addPlayBackListener((e) => {
-      statusRef.current = {
-        playing: e.currentPosition < e.duration,
-        currentTime: e.currentPosition / 1000,
-        duration: e.duration / 1000,
-        didJustFinish: e.currentPosition >= e.duration - 50 && e.duration > 0,
-      };
+export type VoicePlaybackState = {
+  /** This uri is the one loaded in the native player. */
+  active: boolean;
+  playing: boolean;
+  /** True between tapping play and the first progress tick. */
+  loading: boolean;
+  positionMs: number;
+  durationMs: number;
+};
+
+type PlayerSnapshot = {
+  uri: string | null;
+  playing: boolean;
+  loading: boolean;
+  positionMs: number;
+  durationMs: number;
+};
+
+const IDLE: VoicePlaybackState = {
+  active: false,
+  playing: false,
+  loading: false,
+  positionMs: 0,
+  durationMs: 0,
+};
+
+let snap: PlayerSnapshot = {
+  uri: null,
+  playing: false,
+  loading: false,
+  positionMs: 0,
+  durationMs: 0,
+};
+const subscribers = new Set<() => void>();
+const finishListeners = new Set<(uri: string) => void>();
+let wired = false;
+
+function update(patch: Partial<PlayerSnapshot>) {
+  snap = { ...snap, ...patch };
+  for (const fn of subscribers) fn();
+}
+
+function wire() {
+  if (wired) return;
+  wired = true;
+  try {
+    Sound.setSubscriptionDuration(0.1);
+  } catch {
+    /* older native builds */
+  }
+  Sound.addPlayBackListener((e) => {
+    if (!snap.uri) return;
+    update({
+      loading: false,
+      positionMs: e.currentPosition,
+      durationMs: e.duration > 0 ? e.duration : snap.durationMs,
     });
-    return () => {
-      AudioRecorderPlayer.removePlayBackListener();
-    };
-  }, []);
+  });
+  Sound.addPlaybackEndListener(() => {
+    const finished = snap.uri;
+    update({ playing: false, loading: false, positionMs: 0 });
+    if (finished) for (const fn of finishListeners) fn(finished);
+  });
+}
 
+export const voicePlayer = {
+  /** Play / pause / resume `uri`. Throws if the native player can't load it. */
+  async toggle(uri: string): Promise<void> {
+    wire();
+    if (snap.uri === uri && snap.playing) {
+      await Sound.pausePlayer();
+      update({ playing: false });
+      return;
+    }
+    if (snap.uri === uri && !snap.playing && snap.positionMs > 0) {
+      try {
+        await Sound.resumePlayer();
+        update({ playing: true });
+        return;
+      } catch {
+        /* player was released — fall through to a fresh start */
+      }
+    }
+    if (snap.uri && snap.uri !== uri) {
+      await Sound.stopPlayer().catch(() => {});
+    }
+    update({ uri, playing: true, loading: true, positionMs: 0, durationMs: 0 });
+    try {
+      await Sound.startPlayer(uri);
+    } catch (e) {
+      update({ uri: null, playing: false, loading: false });
+      throw e;
+    }
+  },
+
+  async seek(uri: string, positionMs: number): Promise<void> {
+    if (snap.uri !== uri) return;
+    await Sound.seekToPlayer(positionMs);
+    update({ positionMs });
+  },
+
+  async stop(): Promise<void> {
+    if (!snap.uri) return;
+    update({ uri: null, playing: false, loading: false, positionMs: 0 });
+    await Sound.stopPlayer().catch(() => {});
+  },
+
+  /** Called with the uri whenever a note plays to the end. */
+  onFinish(fn: (uri: string) => void) {
+    finishListeners.add(fn);
+    return () => {
+      finishListeners.delete(fn);
+    };
+  },
+};
+
+function stateFor(uri: string): VoicePlaybackState {
+  if (snap.uri !== uri) return IDLE;
   return {
-    async play() {
-      await AudioRecorderPlayer.startPlayer(source.uri);
-      statusRef.current = { ...statusRef.current, playing: true };
-    },
-    async pause() {
-      await AudioRecorderPlayer.pausePlayer();
-      statusRef.current = { ...statusRef.current, playing: false };
-    },
-    async seekTo(seconds: number) {
-      await AudioRecorderPlayer.seekToPlayer(seconds * 1000);
-    },
-    getStatus: () => statusRef.current,
+    active: true,
+    playing: snap.playing,
+    loading: snap.loading,
+    positionMs: snap.positionMs,
+    durationMs: snap.durationMs,
   };
 }
 
-export function useAudioPlayerStatus(player: AudioPlayer): PlayerStatus {
-  const [, setTick] = useState(0);
+function sameState(a: VoicePlaybackState, b: VoicePlaybackState) {
+  return (
+    a.active === b.active &&
+    a.playing === b.playing &&
+    a.loading === b.loading &&
+    a.positionMs === b.positionMs &&
+    a.durationMs === b.durationMs
+  );
+}
+
+/** Playback state for one voice note; re-renders only when it changes. */
+export function useVoicePlayback(uri: string): VoicePlaybackState {
+  const [state, setState] = useState<VoicePlaybackState>(() => stateFor(uri));
   useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 200);
-    return () => clearInterval(id);
-  }, []);
-  return player.getStatus();
+    const sync = () => {
+      const next = stateFor(uri);
+      setState((prev) => (sameState(prev, next) ? prev : next));
+    };
+    sync();
+    subscribers.add(sync);
+    return () => {
+      subscribers.delete(sync);
+    };
+  }, [uri]);
+  return state;
 }

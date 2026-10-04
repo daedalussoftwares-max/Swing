@@ -1,6 +1,25 @@
+plugins {
+  id("com.facebook.react")
+}
+
 apply plugin: "com.android.application"
 apply plugin: "org.jetbrains.kotlin.android"
-apply plugin: "com.facebook.react"
+// Firebase Cloud Messaging: only wire google-services once the user drops
+// google-services.json into android/app (see docs/PUSH-SETUP.md). Without it
+// the app builds and runs with push disabled.
+if (file("google-services.json").exists()) {
+    apply plugin: "com.google.gms.google-services"
+} else {
+    logger.warn("swing: android/app/google-services.json not found, push notifications disabled")
+}
+def vectorIconFontsDir = ["node", "--print", "require.resolve('react-native-vector-icons/Fonts')"]
+    .execute(null, rootDir.parentFile)
+    .text
+    .trim()
+project.ext.vectoricons = [
+    iconFontsDir: vectorIconFontsDir,
+    iconFontNames: [ "Ionicons.ttf" ],
+]
 apply from: file("../../node_modules/react-native-vector-icons/fonts.gradle")
 
 def projectRoot = rootDir.getAbsoluteFile().getParentFile().getAbsolutePath()
@@ -16,6 +35,12 @@ react {
     codegenDir = new File(["node", "--print", "require.resolve('@react-native/codegen/package.json', { paths: [require.resolve('react-native/package.json')] })"].execute(null, rootDir).text.trim()).getParentFile().getAbsoluteFile()
 
     enableBundleCompression = (findProperty('android.enableBundleCompression') ?: false).toBoolean()
+
+    // assembleDebug via android-apk.sh sets swing.bundleDebugApk=true so sideloaded APK
+    // includes JS (otherwise the app expects Metro on the phone and can crash on open).
+    if ((findProperty('swing.bundleDebugApk') ?: 'false').toString() == 'true') {
+        debuggableVariants = []
+    }
 
     autolinkLibrariesWithApp()
 }
@@ -109,6 +134,7 @@ android {
 }
 
 dependencies {
+    implementation("androidx.core:core-splashscreen:1.0.1")
     implementation("com.facebook.react:react-android")
 
     if (hermesEnabled.toBoolean()) {

@@ -1,41 +1,26 @@
 /**
  * 1-on-1 chat thread — Instagram-DM inspired.
  *
- * Composer:
- *   - Curved (not pill) rounded input with proper padding and a max
- *     height (`MAX_INPUT_HEIGHT`) so a long paragraph never hides
- *     existing chat history — the input grows up to that ceiling, then
- *     scrolls internally.
- *   - Bottom padding shrinks while the keyboard is open so the bar sits
- *     snug above it (no big gap).
- *   - Left:  image-picker button (opens device gallery)
- *   - Right: mic 🎤 when idle, send ➤ when there's a draft, stop+send
- *            when recording.
+ * Performance model (why it's structured like this):
+ *   - The draft lives inside `<Composer>`, so typing re-renders only the
+ *     input row — never the message list.
+ *   - The list is an inverted FlatList: newest message sits at the bottom
+ *     with no `scrollToEnd` timers, and older pages load on scroll-up.
+ *   - Rows are memoised (`MessageRow`) and receive stable callbacks, so a
+ *     new message renders one bubble, not the whole thread.
+ *   - The keyboard offset is animated on the UI thread
+ *     (`useAnimatedKeyboard`) — no JS re-render per keyboard frame, and it
+ *     works with Android edge-to-edge where `adjustResize` doesn't.
+ *   - Typing indicators go over the WebSocket, throttled.
  *
  * Per-message interactions:
- *   - Tap            → opens images full-screen (`ImageViewerModal`)
+ *   - Tap            → opens images full-screen (`ImageViewerModal`);
+ *                      on a failed message → Retry / Delete.
  *   - Long-press     → action menu: Reply / Copy / Edit / Delete +
  *                      a quick-reaction emoji row at the top.
- *   - Swipe          → "slide-to-reply" (right for partner, left for
- *                      me, à la WhatsApp). A reply icon fades in
- *                      behind the bubble; released past the threshold
- *                      triggers the reply state.
+ *   - Swipe right    → slide-to-reply.
  *   - Status flow    → Sending… → Sent → Delivered → Seen, shown ONLY
  *                      under the most recent message I sent.
- *
- * Reply / Edit / Delete:
- *   - Reply: a quoted preview pill is rendered ABOVE the composer with
- *     a ✕ cancel button; when sending, the new message carries a
- *     `replyToMessageId` and the bubble shows a quote header.
- *   - Edit: the composer turns into "edit mode" — draft prefilled with
- *     the original text, send button becomes ✓, a cancel button (✕)
- *     aborts. Edited messages render a small "edited" label.
- *   - Delete: soft-deletes the message. The bubble is replaced with an
- *     "Unsent" placeholder so reply-chains pointing at it stay coherent.
- *
- * Robustness:
- *   - When the app goes to background, the keyboard is dismissed so the
- *     multiline input can't get stuck at an over-grown height on resume.
  */
 
 import { Ionicons } from '@/lib/native/vector-icons';
@@ -43,34 +28,48 @@ import {
   AudioModule,
   RecordingPresets,
   setAudioModeAsync,
-  useAudioPlayer,
-  useAudioPlayerStatus,
   useAudioRecorder,
+  useVoicePlayback,
+  voicePlayer,
 } from '@/lib/native/audio';
 import * as Clipboard from '@/lib/native/clipboard';
 import * as Haptics from '@/lib/native/haptics';
 import { Image } from '@/lib/native/image';
 import * as ImagePicker from '@/lib/native/image-picker';
+import { useFocusEffect } from '@react-navigation/native';
 import { useLocalSearchParams, useRouter } from '@/lib/router';
-import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  forwardRef,
+  memo,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import {
+  ActivityIndicator,
   Alert,
   AppState,
   FlatList,
   Keyboard,
-  KeyboardAvoidingView,
   Modal,
   PanResponder,
-  Platform,
   Pressable,
   StyleSheet,
   TextInput,
   View,
+  type ListRenderItem,
 } from 'react-native';
 import Animated, {
   Easing,
   Extrapolation,
+  FadeIn,
+  FadeInDown,
+  FadeOut,
   interpolate,
+  useAnimatedKeyboard,
   useAnimatedStyle,
   useSharedValue,
   withDelay,
@@ -84,19 +83,16 @@ import {
   ActionSheet,
   type ActionSheetItem,
 } from '@/components/action-sheet';
-import { BlockingLoader } from '@/components/blocking-loader';
 import { ChatActionMenu } from '@/components/chat-action-menu';
 import { ImageViewerModal } from '@/components/image-viewer-modal';
 import { ThemedText } from '@/components/themed-text';
 import { Colors, Radii, Spacing } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
-import { readTokens } from '@/lib/api/token-storage';
-import { humanizeAuthError, useAuth } from '@/lib/auth-context';
+import { useRefreshOnAppActive } from '@/hooks/use-refresh-on-app-active';
+import { getFreshAccessToken } from '@/lib/api/session';
+import { useAuth } from '@/lib/auth-context';
 import { useChats } from '@/lib/chats-context';
-import {
-  isLocalMediaUri,
-  uploadChatMedia,
-} from '@/lib/upload-media';
+import { isLocalMediaUri, refreshMediaViewUrl } from '@/lib/upload-media';
 import type { ChatMessage } from '@/types/chat';
 
 const QUICK_REACTIONS = ['❤️', '😂', '😮', '😢', '🔥', '🙏'];
@@ -108,9 +104,24 @@ const MAX_INPUT_HEIGHT = 110;
 const SWIPE_REPLY_THRESHOLD = 60;
 /** Maximum visual translation the bubble can travel during a swipe. */
 const SWIPE_MAX_TRAVEL = 80;
+/** Re-send "typing" at most this often while the user keeps typing. */
+const TYPING_THROTTLE_MS = 3_000;
+/** Send "stopped typing" after this much idle time. */
+const TYPING_IDLE_MS = 3_000;
+
+const EMPTY_MESSAGES: ChatMessage[] = [];
 
 type ActiveMessage = { id: string; isMine: boolean } | null;
 type EditingMessage = { id: string; originalText: string } | null;
+
+type RowActions = {
+  longPress: (m: ChatMessage) => void;
+  reply: (m: ChatMessage) => void;
+  tapImage: (uri: string) => void;
+  openViewOnce: (m: ChatMessage) => void;
+  onceAudioEnded: () => void;
+  pressFailed: (m: ChatMessage) => void;
+};
 
 export default function ChatScreen() {
   const { chatId } = useLocalSearchParams<{ chatId: string }>();
@@ -119,20 +130,42 @@ export default function ChatScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const auth = useAuth();
-  const [sendingMedia, setSendingMedia] = useState(false);
+  const signedIn = auth.status === 'signed-in' && !!auth.user?.id;
   const {
-    getChat,
+    chats,
+    refresh,
     sendMessage,
+    retryMessage,
+    discardMessage,
     editMessage,
     deleteMessage,
     markChatOpened,
+    setActiveChat,
+    setTyping,
+    unblockChat,
     addReaction,
-    markViewed,
+    openViewOnce,
+    loadMessages,
+    loadOlderMessages,
   } = useChats();
 
-  const chat = chatId ? getChat(chatId) : undefined;
-  const [draft, setDraft] = useState('');
-  const [keyboardOpen, setKeyboardOpen] = useState(false);
+  const chat = useMemo(() => {
+    const key = chatId?.trim().toLowerCase();
+    return key ? chats.find((x) => x.id.toLowerCase() === key) : undefined;
+  }, [chats, chatId]);
+  const chatExists = !!chat;
+  const [lookupDone, setLookupDone] = useState(false);
+  // Messages newer than this animate in; history doesn't.
+  const [mountedAt] = useState(() => Date.now());
+  const [hadChat, setHadChat] = useState(false);
+  if (chatExists && !hadChat) setHadChat(true);
+
+  // The partner (or my other device) deleted this conversation.
+  useEffect(() => {
+    if (!hadChat || chatExists) return;
+    Alert.alert('Chat deleted', 'This conversation is no longer available.');
+    router.back();
+  }, [hadChat, chatExists, router]);
 
   // Long-press menu target. `null` hides the menu.
   const [activeMessage, setActiveMessage] = useState<ActiveMessage>(null);
@@ -144,119 +177,180 @@ export default function ChatScreen() {
   const [previewUri, setPreviewUri] = useState<string | null>(null);
   // Show the chat-level action sheet (three-dots in header).
   const [showChatActions, setShowChatActions] = useState(false);
+  // A view-once voice note the recipient just opened (playing right now).
+  const [onceAudio, setOnceAudio] = useState<{ messageId: string; url: string } | null>(
+    null,
+  );
+  // Failed message the user tapped (Retry / Delete sheet).
+  const [failedTarget, setFailedTarget] = useState<ChatMessage | null>(null);
   /** Pending media awaiting "Send / Send once" choice. Null while idle. */
-  const [pendingMedia, setPendingMedia] = useState<
-    | { kind: 'image'; imageUri: string }
-    | { kind: 'audio'; audioUri: string; audioDurationMs: number }
-    | null
-  >(null);
+  const [pendingMedia, setPendingMedia] = useState<{ imageUri: string } | null>(
+    null,
+  );
   // Voice-recording state.
   const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
-  const [recordingState, setRecordingState] = useState<'idle' | 'recording'>(
-    'idle',
-  );
   const [recordMs, setRecordMs] = useState(0);
   const recordStartRef = useRef<number>(0);
   const recordTickRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const listRef = useRef<FlatList<ChatMessage>>(null);
-  const inputRef = useRef<TextInput>(null);
+  const composerRef = useRef<ComposerHandle>(null);
 
-  // Lookup helper used by `QuotedMessage`: given a message id, return the
-  // message it references (if any) so we can render the quoted preview.
-  const messageById: Record<string, ChatMessage> = {};
-  if (chat) for (const m of chat.messages) messageById[m.id] = m;
+  // ───── Data loading / read state ───────────────────────────────────────
 
-  // Index of the last "me" message — drives the Insta-style status label.
-  const lastMineIndex = (() => {
-    if (!chat) return -1;
-    for (let i = chat.messages.length - 1; i >= 0; i--) {
-      if (chat.messages[i].authorId === 'me') return i;
+  useEffect(() => {
+    if (!chatId || !signedIn) return;
+    if (chatExists) {
+      void loadMessages(chatId);
+      return;
     }
-    return -1;
-  })();
-
-  useEffect(() => {
-    if (chatId) markChatOpened(chatId);
-  }, [chatId, markChatOpened]);
-
-  // Auto-scroll to bottom on new message / typing change.
-  useEffect(() => {
-    if (!chat) return;
-    const timer = setTimeout(() => {
-      listRef.current?.scrollToEnd({ animated: true });
-    }, 80);
-    return () => clearTimeout(timer);
-  }, [chat?.messages.length, chat?.partnerTyping, chat]);
-
-  // Track keyboard state — used to tighten composer padding while open.
-  useEffect(() => {
-    const showEvt =
-      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
-    const hideEvt =
-      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
-    const s = Keyboard.addListener(showEvt, () => setKeyboardOpen(true));
-    const h = Keyboard.addListener(hideEvt, () => setKeyboardOpen(false));
+    // Deep link / notification into a chat the list hasn't seen yet.
+    let cancelled = false;
+    void refresh().finally(() => {
+      if (!cancelled) setLookupDone(true);
+    });
     return () => {
-      s.remove();
-      h.remove();
+      cancelled = true;
     };
-  }, []);
+  }, [chatId, signedIn, chatExists, loadMessages, refresh]);
 
-  // When the app goes to background / inactive, drop the keyboard AND
-  // reset our tracked `keyboardOpen` flag. Without the explicit reset
-  // we'd sometimes return to the app with stale state because iOS
-  // doesn't always fire `keyboardWillHide` when the OS yanks the
-  // keyboard for an app switch.
+  // While this screen is focused, incoming messages are read instantly.
+  useFocusEffect(
+    useCallback(() => {
+      if (!chatId) return;
+      setActiveChat(chatId);
+      return () => setActiveChat(null);
+    }, [chatId, setActiveChat]),
+  );
+
+  const onAppActive = useCallback(() => {
+    if (!chatId) return;
+    void loadMessages(chatId);
+    markChatOpened(chatId);
+  }, [chatId, loadMessages, markChatOpened]);
+  useRefreshOnAppActive(onAppActive);
+
+  // When the app goes to background, drop the keyboard so the multiline
+  // input can't get stuck at an over-grown height on resume.
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {
-      if (state !== 'active') {
-        Keyboard.dismiss();
-        inputRef.current?.blur();
-        setKeyboardOpen(false);
-      }
+      if (state !== 'active') Keyboard.dismiss();
     });
     return () => sub.remove();
   }, []);
 
-  if (!chat) {
-    return (
-      <SafeAreaView style={[styles.root, { backgroundColor: c.background }]}>
-        <View style={styles.notFound}>
-          <ThemedText style={styles.notFoundText}>Chat not found.</ThemedText>
-          <Pressable onPress={() => router.back()}>
-            <ThemedText style={{ color: c.tint, marginTop: Spacing.md }}>
-              Go back
-            </ThemedText>
-          </Pressable>
-        </View>
-      </SafeAreaView>
-    );
-  }
+  // ───── List data ───────────────────────────────────────────────────────
 
-  // ───── Sending ─────────────────────────────────────────────────────────
-
-  const handleSend = () => {
-    if (!draft.trim()) return;
-    Haptics.selectionAsync();
-
-    if (editing) {
-      editMessage(chat.id, editing.id, draft);
-      setEditing(null);
-      setDraft('');
-      return;
+  const messages = chat?.messages ?? EMPTY_MESSAGES;
+  // Inverted list → newest first.
+  const listData = useMemo(() => [...messages].reverse(), [messages]);
+  const messageById = useMemo(() => {
+    const map = new Map<string, ChatMessage>();
+    for (const m of messages) map.set(m.id, m);
+    return map;
+  }, [messages]);
+  const lastMineId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].authorId === 'me') return messages[i].id;
     }
+    return null;
+  }, [messages]);
 
-    sendMessage(chat.id, {
-      kind: 'text',
-      text: draft,
-      replyToMessageId: replyTarget?.id,
-    });
-    setDraft('');
-    setReplyTarget(null);
-  };
+  const rowActions = useMemo<RowActions>(
+    () => ({
+      longPress: (m) => {
+        if (m.deletedAt || m.status === 'failed' || m.status === 'sending') return;
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        setActiveMessage({ id: m.id, isMine: m.authorId === 'me' });
+      },
+      reply: (m) => {
+        if (m.status === 'failed' || m.status === 'sending') return;
+        Haptics.selectionAsync();
+        setReplyTarget(m);
+        composerRef.current?.focus();
+      },
+      tapImage: (uri) => setPreviewUri(uri),
+      openViewOnce: (m) => {
+        if (!chatId) return;
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        void openViewOnce(chatId, m.id).then((url) => {
+          if (!url) return;
+          if (m.kind === 'image') {
+            setPreviewUri(url);
+          } else {
+            setOnceAudio({ messageId: m.id, url });
+            void voicePlayer.toggle(url).catch(() => setOnceAudio(null));
+          }
+        });
+      },
+      onceAudioEnded: () => setOnceAudio(null),
+      pressFailed: (m) => setFailedTarget(m),
+    }),
+    [chatId, openViewOnce],
+  );
 
-  const handlePickImage = async () => {
+  const renderItem = useCallback<ListRenderItem<ChatMessage>>(
+    ({ item, index }) => (
+      <MessageRow
+        message={item}
+        prevAuthorId={listData[index + 1]?.authorId}
+        isLastMine={item.id === lastMineId}
+        animateIn={Date.parse(item.createdAt) > mountedAt}
+        onceAudioUrl={onceAudio?.messageId === item.id ? onceAudio.url : undefined}
+        quoted={
+          item.replyToMessageId
+            ? messageById.get(item.replyToMessageId)
+            : undefined
+        }
+        actions={rowActions}
+      />
+    ),
+    [listData, lastMineId, messageById, rowActions, mountedAt, onceAudio],
+  );
+
+  const onEndReached = useCallback(() => {
+    if (chatId) void loadOlderMessages(chatId);
+  }, [chatId, loadOlderMessages]);
+
+  // ───── Keyboard (UI thread) ────────────────────────────────────────────
+
+  const keyboard = useAnimatedKeyboard({
+    isStatusBarTranslucentAndroid: true,
+    isNavigationBarTranslucentAndroid: true,
+  });
+  const bottomInset = insets.bottom;
+  const keyboardPad = useAnimatedStyle(() => ({
+    paddingBottom: Math.max(0, keyboard.height.value - bottomInset),
+  }));
+
+  // ───── Composer callbacks ──────────────────────────────────────────────
+
+  const handleSubmit = useCallback(
+    (text: string) => {
+      if (!chatId) return;
+      Haptics.selectionAsync();
+      if (editing) {
+        editMessage(chatId, editing.id, text);
+        setEditing(null);
+        return;
+      }
+      void sendMessage(chatId, {
+        kind: 'text',
+        text,
+        replyToMessageId: replyTarget?.id,
+      });
+      setReplyTarget(null);
+    },
+    [chatId, editing, replyTarget, editMessage, sendMessage],
+  );
+
+  const handleTyping = useCallback(
+    (isTyping: boolean) => {
+      if (chatId) setTyping(chatId, isTyping);
+    },
+    [chatId, setTyping],
+  );
+
+  const handlePickImage = useCallback(async () => {
     Haptics.selectionAsync();
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!perm.granted) {
@@ -272,190 +366,141 @@ export default function ChatScreen() {
       quality: 0.8,
     });
     if (result.canceled || result.assets.length === 0) return;
-    const asset = result.assets[0];
     // Park the picked image and let the user choose Send vs Send once.
-    setPendingMedia({ kind: 'image', imageUri: asset.uri });
-  };
+    setPendingMedia({ imageUri: result.assets[0].uri });
+  }, []);
 
-  // ───── Voice recording ─────────────────────────────────────────────────
+  // ───── Voice recording (gesture lives in <Composer>) ───────────────────
 
-  const startRecording = async () => {
+  const recordingRef = useRef(false);
+
+  /** Starts the recorder. Resolves false when we only asked for the mic
+   *  permission (first use — the finger is long gone by then) or failed. */
+  const startRecording = useCallback(async (): Promise<boolean> => {
     try {
-      const perm = await AudioModule.requestRecordingPermissionsAsync();
-      if (!perm.granted) {
-        Alert.alert(
-          'Permission needed',
-          'Allow Swing to use the microphone to record voice messages.',
-        );
-        return;
+      const current = await AudioModule.getRecordingPermissionsAsync();
+      if (!current.granted) {
+        const perm = await AudioModule.requestRecordingPermissionsAsync();
+        if (!perm.granted) {
+          Alert.alert(
+            'Microphone needed',
+            'Allow Swing to use the microphone to send voice messages.',
+          );
+        }
+        return false;
       }
-      // iOS refuses to record unless the audio session is explicitly
-      // switched into a recording-allowed mode first. `playsInSilentMode`
-      // is also flipped so we can play back the clip even when the user's
-      // ringer is off (same behaviour as WhatsApp / Insta).
-      await setAudioModeAsync({
-        allowsRecording: true,
-        playsInSilentMode: true,
-      });
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+      await voicePlayer.stop();
+      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
       await recorder.prepareToRecordAsync();
-      recorder.record();
+      await recorder.record();
+      recordingRef.current = true;
       recordStartRef.current = Date.now();
       setRecordMs(0);
-      setRecordingState('recording');
+      if (recordTickRef.current) clearInterval(recordTickRef.current);
       recordTickRef.current = setInterval(() => {
         setRecordMs(Date.now() - recordStartRef.current);
       }, 200);
+      return true;
     } catch (e) {
       console.warn('Failed to start recording', e);
-      setRecordingState('idle');
+      Alert.alert('Could not record', 'The microphone is unavailable right now.');
+      return false;
     }
-  };
+  }, [recorder]);
 
-  const stopAndSendRecording = async () => {
-    if (recordingState !== 'recording') return;
-    if (recordTickRef.current) {
-      clearInterval(recordTickRef.current);
-      recordTickRef.current = null;
-    }
-    Haptics.selectionAsync();
-    try {
-      await recorder.stop();
-      const uri = recorder.uri;
-      const duration = Date.now() - recordStartRef.current;
-      setRecordingState('idle');
-      // Drop back out of recording mode so AVAudioSession releases the
-      // mic and the player can speak through the loudspeaker.
-      setAudioModeAsync({ allowsRecording: false }).catch(() => {});
-      if (uri && duration > 400) {
-        // Same "Send / Send once" picker as for images.
-        setPendingMedia({
-          kind: 'audio',
-          audioUri: uri,
-          audioDurationMs: duration,
-        });
+  const finishRecording = useCallback(
+    async (action: 'send' | 'cancel', viewOnce: boolean) => {
+      if (!recordingRef.current) return;
+      recordingRef.current = false;
+      if (recordTickRef.current) {
+        clearInterval(recordTickRef.current);
+        recordTickRef.current = null;
       }
-    } catch (e) {
-      console.warn('Failed to stop recording', e);
-      setRecordingState('idle');
-    }
-  };
+      const duration = Date.now() - recordStartRef.current;
+      setRecordMs(0);
+      let uri: string | null;
+      try {
+        uri = (await recorder.stop()).uri;
+      } catch (e) {
+        console.warn('Failed to stop recording', e);
+        if (action === 'send') {
+          Alert.alert('Recording failed', 'Please try recording again.');
+        }
+        return;
+      } finally {
+        setAudioModeAsync({ allowsRecording: false }).catch(() => {});
+      }
+      if (action !== 'send' || !uri || !chatId) return;
+      void sendMessage(chatId, {
+        kind: 'audio',
+        text: '',
+        audioUri: uri,
+        audioDurationMs: duration,
+        viewOnce,
+        replyToMessageId: replyTarget?.id,
+      });
+      setReplyTarget(null);
+    },
+    [recorder, chatId, sendMessage, replyTarget],
+  );
+
+  useEffect(
+    () => () => {
+      if (recordTickRef.current) clearInterval(recordTickRef.current);
+      void voicePlayer.stop();
+    },
+    [],
+  );
 
   /**
-   * Commits the pending media (image or voice) to the chat, honouring the
-   * user's "view once" choice from the action sheet.
+   * Queues the picked photo. The bubble appears instantly with the local
+   * file; upload + send happen in the background.
    */
-  const commitPendingMedia = async (viewOnce: boolean) => {
-    if (!pendingMedia || !chat) return;
+  const commitPendingMedia = (viewOnce: boolean) => {
+    if (!pendingMedia || !chatId) return;
     Haptics.selectionAsync();
-
-    const base = {
+    void sendMessage(chatId, {
+      kind: 'image',
       text: '',
+      imageUri: pendingMedia.imageUri,
       replyToMessageId: replyTarget?.id,
       viewOnce,
-    };
-
-    const sendLocal = () => {
-      if (pendingMedia.kind === 'image') {
-        sendMessage(chat.id, {
-          ...base,
-          kind: 'image',
-          imageUri: pendingMedia.imageUri,
-        });
-      } else {
-        sendMessage(chat.id, {
-          ...base,
-          kind: 'audio',
-          audioUri: pendingMedia.audioUri,
-          audioDurationMs: pendingMedia.audioDurationMs,
-        });
-      }
-      setPendingMedia(null);
-      setReplyTarget(null);
-    };
-
-    const uri =
-      pendingMedia.kind === 'image'
-        ? pendingMedia.imageUri
-        : pendingMedia.audioUri;
-
-    if (auth.status !== 'signed-in' || !isLocalMediaUri(uri)) {
-      sendLocal();
-      return;
-    }
-
-    setSendingMedia(true);
-    try {
-      const { accessToken } = await readTokens();
-      if (!accessToken) {
-        sendLocal();
-        return;
-      }
-      const uploaded = await uploadChatMedia(
-        accessToken,
-        chat.id,
-        uri,
-        pendingMedia.kind,
-      );
-      if (pendingMedia.kind === 'image') {
-        sendMessage(chat.id, {
-          ...base,
-          kind: 'image',
-          imageUri: uploaded.viewUrl,
-          mediaKey: uploaded.mediaKey,
-        });
-      } else {
-        sendMessage(chat.id, {
-          ...base,
-          kind: 'audio',
-          audioUri: uploaded.viewUrl,
-          audioDurationMs: pendingMedia.audioDurationMs,
-          mediaKey: uploaded.mediaKey,
-        });
-      }
-      setPendingMedia(null);
-      setReplyTarget(null);
-    } catch (e) {
-      Alert.alert(
-        'Could not send',
-        humanizeAuthError(e, 'Something went wrong. Try again.'),
-      );
-    } finally {
-      setSendingMedia(false);
-    }
+    });
+    setPendingMedia(null);
+    setReplyTarget(null);
   };
 
-  const cancelRecording = async () => {
-    if (recordTickRef.current) {
-      clearInterval(recordTickRef.current);
-      recordTickRef.current = null;
-    }
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    try {
-      await recorder.stop();
-    } catch {
-      // ignore — already stopped
-    }
-    setRecordingState('idle');
-    setAudioModeAsync({ allowsRecording: false }).catch(() => {});
-  };
+  // ───── Not found / loading ─────────────────────────────────────────────
+
+  if (!chat) {
+    const stillLooking = signedIn && !lookupDone;
+    return (
+      <SafeAreaView style={[styles.root, { backgroundColor: c.background }]}>
+        <View style={styles.notFound}>
+          {stillLooking ? (
+            <ActivityIndicator color={c.tint} />
+          ) : (
+            <>
+              <ThemedText style={styles.notFoundText}>Chat not found.</ThemedText>
+              <Pressable onPress={() => router.back()}>
+                <ThemedText style={{ color: c.tint, marginTop: Spacing.md }}>
+                  Go back
+                </ThemedText>
+              </Pressable>
+            </>
+          )}
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   // ───── Per-message actions ─────────────────────────────────────────────
-
-  const openLongPress = (m: ChatMessage) => {
-    if (m.deletedAt) return; // can't act on unsent messages
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    setActiveMessage({ id: m.id, isMine: m.authorId === 'me' });
-  };
 
   const closeLongPress = () => setActiveMessage(null);
 
   const handleReply = (m: ChatMessage) => {
-    Haptics.selectionAsync();
-    setReplyTarget(m);
     closeLongPress();
-    // Focus the input so the user can start typing immediately.
-    setTimeout(() => inputRef.current?.focus(), 50);
+    rowActions.reply(m);
   };
 
   const handleCopy = async (m: ChatMessage) => {
@@ -468,10 +513,10 @@ export default function ChatScreen() {
     if (m.kind !== 'text' || m.authorId !== 'me') return;
     Haptics.selectionAsync();
     setEditing({ id: m.id, originalText: m.text });
-    setDraft(m.text);
     setReplyTarget(null);
     closeLongPress();
-    setTimeout(() => inputRef.current?.focus(), 50);
+    composerRef.current?.setText(m.text);
+    composerRef.current?.focus();
   };
 
   const handleDelete = (m: ChatMessage) => {
@@ -498,7 +543,7 @@ export default function ChatScreen() {
   const cancelReply = () => setReplyTarget(null);
   const cancelEdit = () => {
     setEditing(null);
-    setDraft('');
+    composerRef.current?.setText('');
   };
 
   const openPartnerProfile = () => {
@@ -506,8 +551,8 @@ export default function ChatScreen() {
   };
 
   const activeMessageObj = activeMessage
-    ? chat.messages.find((m) => m.id === activeMessage.id)
-    : null;
+    ? messageById.get(activeMessage.id)
+    : undefined;
 
   return (
     <SafeAreaView
@@ -522,9 +567,19 @@ export default function ChatScreen() {
 
         <Pressable onPress={openPartnerProfile} style={styles.headerCenter}>
           <View style={[styles.headerAvatar, { backgroundColor: c.tintMuted }]}>
-            <ThemedText style={[styles.headerAvatarInitial, { color: c.tintPressed }]}>
-              {chat.partner.name.charAt(0).toUpperCase()}
-            </ThemedText>
+            {chat.partner.avatarUrl ? (
+              <Image
+                source={{ uri: chat.partner.avatarUrl }}
+                style={styles.headerAvatarImage}
+                contentFit="cover"
+              />
+            ) : (
+              <ThemedText
+                style={[styles.headerAvatarInitial, { color: c.tintPressed }]}
+              >
+                {chat.partner.name.charAt(0).toUpperCase()}
+              </ThemedText>
+            )}
             {chat.partner.onlineNow ? (
               <View
                 style={[
@@ -538,12 +593,17 @@ export default function ChatScreen() {
             <ThemedText style={styles.headerName} numberOfLines={1}>
               {chat.partner.name}
             </ThemedText>
-            <ThemedText style={[styles.headerSub, { color: c.textMuted }]}>
+            <ThemedText
+              style={[
+                styles.headerSub,
+                { color: chat.partnerTyping ? c.tint : c.textMuted },
+              ]}
+            >
               {chat.partnerTyping
                 ? 'typing…'
                 : chat.partner.onlineNow
                   ? 'Active now'
-                  : 'Active recently'}
+                  : 'Offline'}
             </ThemedText>
           </View>
         </Pressable>
@@ -553,47 +613,37 @@ export default function ChatScreen() {
         </Pressable>
       </View>
 
-      {/* Body: messages + composer share the KAV so the composer rides up
-          with the keyboard. */}
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        keyboardVerticalOffset={0}
-        style={styles.flex}
-      >
-        <FlatList
-          ref={listRef}
-          style={styles.flex}
-          data={chat.messages}
-          keyExtractor={(m) => m.id}
-          showsVerticalScrollIndicator
-          keyboardShouldPersistTaps="handled"
-          keyboardDismissMode="interactive"
-          contentContainerStyle={styles.list}
-          renderItem={({ item, index }) => (
-            <SwipeableBubble
-              isMe={item.authorId === 'me'}
-              onReply={() => setReplyTarget(item)}
-              accentColor={c.tint}
-              mutedColor={c.textMuted}
-              disabled={!!item.deletedAt}
-            >
-              <MessageBubble
-                message={item}
-                prevAuthorId={chat.messages[index - 1]?.authorId}
-                isLastMine={index === lastMineIndex}
-                quoted={
-                  item.replyToMessageId
-                    ? messageById[item.replyToMessageId]
-                    : undefined
-                }
-                onLongPress={() => openLongPress(item)}
-                onTapImage={(uri) => setPreviewUri(uri)}
-                onMarkViewed={() => markViewed(chat.id, item.id)}
-              />
-            </SwipeableBubble>
-          )}
-          ListFooterComponent={chat.partnerTyping ? <TypingBubble /> : null}
-        />
+      {/* Body: messages + composer ride up with the keyboard together. */}
+      <Animated.View style={[styles.flex, keyboardPad]}>
+        {messages.length === 0 && !chat.historyLoaded ? (
+          <View style={styles.listPlaceholder}>
+            <ActivityIndicator color={c.textMuted} />
+          </View>
+        ) : messages.length === 0 && !chat.partnerTyping ? (
+          <Pressable style={styles.listPlaceholder} onPress={Keyboard.dismiss}>
+            <ThemedText style={[styles.emptyThread, { color: c.textMuted }]}>
+              No messages yet. Say hi!
+            </ThemedText>
+          </Pressable>
+        ) : (
+          <FlatList
+            inverted
+            style={styles.flex}
+            data={listData}
+            keyExtractor={keyExtractor}
+            renderItem={renderItem}
+            showsVerticalScrollIndicator
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="interactive"
+            contentContainerStyle={styles.list}
+            onEndReached={onEndReached}
+            onEndReachedThreshold={0.4}
+            initialNumToRender={20}
+            maxToRenderPerBatch={12}
+            windowSize={11}
+            ListHeaderComponent={chat.partnerTyping ? <TypingBubble /> : null}
+          />
+        )}
 
         {/* Composer */}
         <View
@@ -602,9 +652,7 @@ export default function ChatScreen() {
             {
               borderTopColor: c.border,
               backgroundColor: c.surface,
-              paddingBottom: keyboardOpen
-                ? Spacing.xs
-                : insets.bottom + Spacing.sm,
+              paddingBottom: insets.bottom + Spacing.sm,
             },
           ]}
         >
@@ -638,78 +686,37 @@ export default function ChatScreen() {
             </View>
           ) : null}
 
-          {recordingState === 'recording' ? (
-            <RecordingComposer
-              ms={recordMs}
-              onCancel={cancelRecording}
-              onSend={stopAndSendRecording}
-              cancelColor={c.danger}
-              sendColor={c.tint}
-              barColor={c.surfaceAlt}
-              borderColor={c.border}
-              textColor={c.text}
-              mutedColor={c.textMuted}
-            />
-          ) : (
-            <View style={styles.composerRow}>
+          {chat.isBlocked ? (
+            <View style={styles.blockedBar}>
+              <ThemedText style={[styles.blockedText, { color: c.textMuted }]}>
+                You blocked {chat.partner.name}. You can't message them.
+              </ThemedText>
               <Pressable
-                onPress={handlePickImage}
-                hitSlop={8}
-                style={styles.composerIcon}
-              >
-                <Ionicons name="image-outline" size={26} color={c.textMuted} />
-              </Pressable>
-
-              <View
-                style={[
-                  styles.inputWrap,
-                  { backgroundColor: c.surfaceAlt, borderColor: c.border },
+                onPress={() => unblockChat(chat.id)}
+                style={({ pressed }) => [
+                  styles.unblockButton,
+                  { borderColor: c.tint, opacity: pressed ? 0.7 : 1 },
                 ]}
               >
-                <TextInput
-                  ref={inputRef}
-                  value={draft}
-                  onChangeText={setDraft}
-                  placeholder={editing ? 'Edit message…' : 'Message…'}
-                  placeholderTextColor={c.textSubtle}
-                  style={[styles.input, { color: c.text }]}
-                  multiline
-                  scrollEnabled
-                  maxLength={1000}
-                />
-              </View>
-
-              {draft.trim() ? (
-                <Pressable
-                  onPress={handleSend}
-                  hitSlop={8}
-                  style={[
-                    styles.sendButton,
-                    { backgroundColor: c.tint },
-                  ]}
-                >
-                  <Ionicons
-                    name={editing ? 'checkmark' : 'send'}
-                    size={18}
-                    color="#fff"
-                  />
-                </Pressable>
-              ) : (
-                <Pressable
-                  onPress={startRecording}
-                  hitSlop={8}
-                  style={[
-                    styles.sendButton,
-                    { backgroundColor: c.surfaceAlt },
-                  ]}
-                >
-                  <Ionicons name="mic" size={20} color={c.tint} />
-                </Pressable>
-              )}
+                <ThemedText style={[styles.unblockText, { color: c.tint }]}>
+                  Unblock
+                </ThemedText>
+              </Pressable>
             </View>
+          ) : (
+            <Composer
+              ref={composerRef}
+              editing={!!editing}
+              recordMs={recordMs}
+              onSubmit={handleSubmit}
+              onTyping={handleTyping}
+              onPickImage={handlePickImage}
+              onRecordStart={startRecording}
+              onRecordFinish={finishRecording}
+            />
           )}
         </View>
-      </KeyboardAvoidingView>
+      </Animated.View>
 
       {/* Long-press action menu (modal). */}
       {activeMessageObj ? (
@@ -733,15 +740,10 @@ export default function ChatScreen() {
         />
       ) : null}
 
-      {/* "Send / Send once" picker shown after picking an image OR after
-          stopping a voice recording. */}
+      {/* "Send / View once" picker shown after picking a photo. */}
       <ActionSheet
         visible={pendingMedia !== null}
-        title={
-          pendingMedia?.kind === 'audio'
-            ? 'Send voice message'
-            : 'Send photo'
-        }
+        title="Send photo"
         onClose={() => setPendingMedia(null)}
         items={
           pendingMedia
@@ -752,21 +754,47 @@ export default function ChatScreen() {
                   label: 'Send',
                   primary: true,
                   subtitle: 'Stays in chat history',
-                  onPress: () => void commitPendingMedia(false),
+                  onPress: () => commitPendingMedia(false),
                 } as ActionSheetItem,
                 {
                   id: 'once',
-                  icon:
-                    pendingMedia.kind === 'audio'
-                      ? 'volume-mute-outline'
-                      : 'eye-outline',
-                  label:
-                    pendingMedia.kind === 'audio'
-                      ? 'Listen once'
-                      : 'View once',
+                  icon: 'eye-outline',
+                  label: 'View once',
                   subtitle:
                     'Destroys itself after being opened, leaving only a history line',
-                  onPress: () => void commitPendingMedia(true),
+                  onPress: () => commitPendingMedia(true),
+                } as ActionSheetItem,
+              ])
+            : []
+        }
+      />
+
+      {/* Failed send: Retry / Delete */}
+      <ActionSheet
+        visible={failedTarget !== null}
+        title="Message not sent"
+        onClose={() => setFailedTarget(null)}
+        items={
+          failedTarget?.clientMsgId
+            ? ([
+                {
+                  id: 'retry',
+                  icon: 'refresh',
+                  label: 'Try again',
+                  primary: true,
+                  onPress: () => {
+                    retryMessage(chat.id, failedTarget.clientMsgId!);
+                    setFailedTarget(null);
+                  },
+                } as ActionSheetItem,
+                {
+                  id: 'discard',
+                  icon: 'trash-outline',
+                  label: 'Delete',
+                  onPress: () => {
+                    discardMessage(chat.id, failedTarget.clientMsgId!);
+                    setFailedTarget(null);
+                  },
                 } as ActionSheetItem,
               ])
             : []
@@ -780,11 +808,491 @@ export default function ChatScreen() {
         onClose={() => setShowChatActions(false)}
         popOnDelete
       />
-
-      <BlockingLoader visible={sendingMedia} message="Sending…" />
     </SafeAreaView>
   );
 }
+
+const keyExtractor = (m: ChatMessage) => m.clientMsgId ?? m.id;
+
+// ===========================================================================
+// Composer — owns the draft so keystrokes never re-render the thread.
+// Voice notes are WhatsApp-style: hold the mic to record, release to send,
+// slide left to cancel, slide up to lock (hands-free + "view once").
+// ===========================================================================
+
+type ComposerHandle = {
+  setText: (text: string) => void;
+  focus: () => void;
+};
+
+type RecordMode = 'idle' | 'hold' | 'locked';
+type RecordAction = 'send' | 'cancel';
+
+/** Drag this far left while holding to cancel the recording. */
+const CANCEL_DRAG_PX = 110;
+/** Drag this far up while holding to lock (keep recording hands-free). */
+const LOCK_DRAG_PX = 80;
+/** Shorter notes are treated as an accidental tap. */
+const MIN_VOICE_MS = 700;
+const HOLD_HINT = 'Hold to record, release to send';
+
+type ComposerProps = {
+  editing: boolean;
+  recordMs: number;
+  onSubmit: (text: string) => void;
+  onTyping: (isTyping: boolean) => void;
+  onPickImage: () => void;
+  /** Resolves true once the recorder is running (false: permission prompt
+   *  shown / mic unavailable). */
+  onRecordStart: () => Promise<boolean>;
+  onRecordFinish: (action: RecordAction, viewOnce: boolean) => void;
+};
+
+const Composer = memo(
+  forwardRef<ComposerHandle, ComposerProps>(function Composer(
+    {
+      editing,
+      recordMs,
+      onSubmit,
+      onTyping,
+      onPickImage,
+      onRecordStart,
+      onRecordFinish,
+    },
+    ref,
+  ) {
+    const scheme = useColorScheme() ?? 'light';
+    const c = Colors[scheme];
+    const [text, setText] = useState('');
+    const [mode, setMode] = useState<RecordMode>('idle');
+    const [viewOnce, setViewOnce] = useState(false);
+    const [hint, setHint] = useState<string | null>(null);
+    const inputRef = useRef<TextInput>(null);
+    const typing = useRef<{
+      active: boolean;
+      lastSentAt: number;
+      idle: ReturnType<typeof setTimeout> | null;
+    }>({ active: false, lastSentAt: 0, idle: null });
+
+    // Gesture bookkeeping lives in refs: the PanResponder is created once.
+    const modeRef = useRef<RecordMode>('idle');
+    const gestureRef = useRef({ released: true, startedAt: 0 });
+    const hintTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const handlersRef = useRef({
+      start: onRecordStart,
+      finish: (_a: RecordAction, _v: boolean) => {},
+      hint: (_m: string) => {},
+      lock: () => {},
+    });
+    const dragX = useSharedValue(0);
+    const dragY = useSharedValue(0);
+    const holding = useSharedValue(0);
+
+    useImperativeHandle(
+      ref,
+      () => ({
+        setText: (t: string) => setText(t),
+        focus: () => {
+          setTimeout(() => inputRef.current?.focus(), 50);
+        },
+      }),
+      [],
+    );
+
+    const stopTyping = useCallback(() => {
+      const t = typing.current;
+      if (t.idle) clearTimeout(t.idle);
+      t.idle = null;
+      if (t.active) {
+        t.active = false;
+        onTyping(false);
+      }
+    }, [onTyping]);
+
+    // Clear our "typing…" on the partner's screen when leaving the chat.
+    useEffect(() => stopTyping, [stopTyping]);
+
+    const setRecordMode = useCallback(
+      (next: RecordMode) => {
+        modeRef.current = next;
+        setMode(next);
+        holding.value = withTiming(next === 'hold' ? 1 : 0, { duration: 150 });
+        if (next !== 'hold') {
+          dragX.value = withTiming(0, { duration: 150 });
+          dragY.value = withTiming(0, { duration: 150 });
+        }
+      },
+      [dragX, dragY, holding],
+    );
+
+    const showHint = useCallback((message: string) => {
+      if (hintTimer.current) clearTimeout(hintTimer.current);
+      setHint(message);
+      hintTimer.current = setTimeout(() => setHint(null), 1800);
+    }, []);
+
+    const finish = useCallback(
+      (action: RecordAction, once: boolean) => {
+        if (modeRef.current === 'idle') return;
+        const tooShort = Date.now() - gestureRef.current.startedAt < MIN_VOICE_MS;
+        setRecordMode('idle');
+        setViewOnce(false);
+        if (action === 'send' && tooShort) {
+          onRecordFinish('cancel', false);
+          showHint(HOLD_HINT);
+          return;
+        }
+        Haptics.impactAsync(
+          action === 'send'
+            ? Haptics.ImpactFeedbackStyle.Light
+            : Haptics.ImpactFeedbackStyle.Medium,
+        );
+        onRecordFinish(action, once);
+      },
+      [onRecordFinish, setRecordMode, showHint],
+    );
+
+    useEffect(() => {
+      handlersRef.current = {
+        start: onRecordStart,
+        finish,
+        hint: showHint,
+        lock: () => {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          setRecordMode('locked');
+        },
+      };
+    }, [onRecordStart, finish, showHint, setRecordMode]);
+
+    useEffect(
+      () => () => {
+        if (hintTimer.current) clearTimeout(hintTimer.current);
+        // Leaving the chat mid-recording discards it.
+        if (modeRef.current !== 'idle') handlersRef.current.finish('cancel', false);
+      },
+      [],
+    );
+
+    const [micPan] = useState(() =>
+      PanResponder.create({
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => true,
+        onPanResponderTerminationRequest: () => false,
+        onPanResponderGrant: () => {
+          const g = gestureRef.current;
+          g.released = false;
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          void handlersRef.current.start().then((ok) => {
+            if (!ok) return;
+            g.startedAt = Date.now();
+            modeRef.current = 'hold';
+            if (g.released) {
+              // Finger lifted before the recorder came up: it was a tap.
+              handlersRef.current.finish('send', false);
+              return;
+            }
+            setMode('hold');
+            holding.value = withTiming(1, { duration: 150 });
+          });
+        },
+        onPanResponderMove: (_e, gs) => {
+          if (modeRef.current !== 'hold') return;
+          dragX.value = Math.min(0, gs.dx);
+          dragY.value = Math.min(0, gs.dy);
+          if (gs.dx < -CANCEL_DRAG_PX) {
+            handlersRef.current.finish('cancel', false);
+          } else if (gs.dy < -LOCK_DRAG_PX) {
+            handlersRef.current.lock();
+          }
+        },
+        onPanResponderRelease: () => {
+          gestureRef.current.released = true;
+          if (modeRef.current === 'hold') handlersRef.current.finish('send', false);
+        },
+        onPanResponderTerminate: () => {
+          gestureRef.current.released = true;
+          if (modeRef.current === 'hold') handlersRef.current.finish('cancel', false);
+        },
+      }),
+    );
+
+    const micStyle = useAnimatedStyle(() => ({
+      transform: [
+        { translateX: dragX.value * 0.6 },
+        { translateY: dragY.value * 0.6 },
+        { scale: 1 + holding.value * 0.35 },
+      ],
+    }));
+    const slideStyle = useAnimatedStyle(() => ({
+      opacity: interpolate(dragX.value, [-CANCEL_DRAG_PX, 0], [0.15, 1], Extrapolation.CLAMP),
+      transform: [{ translateX: dragX.value * 0.5 }],
+    }));
+    const lockStyle = useAnimatedStyle(() => ({
+      opacity: holding.value,
+      transform: [
+        { translateY: -56 + dragY.value * 0.4 },
+        { scale: interpolate(dragY.value, [-LOCK_DRAG_PX, 0], [1.15, 1], Extrapolation.CLAMP) },
+      ],
+    }));
+
+    const onChangeText = (value: string) => {
+      setText(value);
+      if (editing) return;
+      if (!value.trim()) {
+        stopTyping();
+        return;
+      }
+      const t = typing.current;
+      const now = Date.now();
+      if (!t.active || now - t.lastSentAt > TYPING_THROTTLE_MS) {
+        t.active = true;
+        t.lastSentAt = now;
+        onTyping(true);
+      }
+      if (t.idle) clearTimeout(t.idle);
+      t.idle = setTimeout(stopTyping, TYPING_IDLE_MS);
+    };
+
+    const submit = () => {
+      const value = text.trim();
+      if (!value) return;
+      stopTyping();
+      onSubmit(value);
+      setText('');
+    };
+
+    const hasText = text.trim().length > 0;
+
+    if (mode === 'locked') {
+      return (
+        <View style={styles.composerRow}>
+          <Pressable
+            onPress={() => finish('cancel', false)}
+            hitSlop={8}
+            style={styles.composerIcon}
+            accessibilityLabel="Delete recording"
+          >
+            <Ionicons name="trash-outline" size={24} color={c.danger} />
+          </Pressable>
+          <View
+            style={[
+              styles.recordingBar,
+              { backgroundColor: c.surfaceAlt, borderColor: c.border },
+            ]}
+          >
+            <RecDot color={c.danger} />
+            <ThemedText style={[styles.recordingTimer, { color: c.text }]}>
+              {formatDuration(recordMs)}
+            </ThemedText>
+            <ThemedText style={[styles.recordingHint, { color: c.textMuted }]}>
+              Recording…
+            </ThemedText>
+          </View>
+          <Pressable
+            onPress={() => {
+              Haptics.selectionAsync();
+              setViewOnce((v) => !v);
+            }}
+            hitSlop={8}
+            style={[
+              styles.onceToggle,
+              {
+                borderColor: viewOnce ? c.tint : c.border,
+                backgroundColor: viewOnce ? c.tint : 'transparent',
+              },
+            ]}
+            accessibilityLabel="Listen once"
+            accessibilityState={{ selected: viewOnce }}
+          >
+            <ThemedText
+              style={[styles.onceToggleText, { color: viewOnce ? '#fff' : c.textMuted }]}
+            >
+              1
+            </ThemedText>
+          </Pressable>
+          <Pressable
+            onPress={() => finish('send', viewOnce)}
+            hitSlop={8}
+            style={[styles.sendButton, { backgroundColor: c.tint }]}
+            accessibilityLabel="Send voice message"
+          >
+            <Ionicons name="send" size={18} color="#fff" />
+          </Pressable>
+        </View>
+      );
+    }
+
+    return (
+      <View>
+        {hint ? (
+          <Animated.View
+            entering={FadeIn.duration(120)}
+            exiting={FadeOut.duration(200)}
+            style={[styles.recordHintBubble, { backgroundColor: c.text }]}
+          >
+            <ThemedText style={[styles.recordHintText, { color: c.background }]}>
+              {hint}
+            </ThemedText>
+          </Animated.View>
+        ) : null}
+        <View style={styles.composerRow}>
+          {mode === 'hold' ? (
+            <View key="rec" style={styles.holdBar}>
+              <RecDot color={c.danger} />
+              <ThemedText style={[styles.recordingTimer, { color: c.text }]}>
+                {formatDuration(recordMs)}
+              </ThemedText>
+              <Animated.View style={[styles.slideCancel, slideStyle]}>
+                <Ionicons name="chevron-back" size={16} color={c.textMuted} />
+                <ThemedText style={[styles.recordingHint, { color: c.textMuted }]}>
+                  Slide to cancel
+                </ThemedText>
+              </Animated.View>
+            </View>
+          ) : (
+            <View key="input" style={styles.inputRow}>
+              <Pressable onPress={onPickImage} hitSlop={8} style={styles.composerIcon}>
+                <Ionicons name="image-outline" size={26} color={c.textMuted} />
+              </Pressable>
+
+              <View
+                style={[
+                  styles.inputWrap,
+                  { backgroundColor: c.surfaceAlt, borderColor: c.border },
+                ]}
+              >
+                <TextInput
+                  ref={inputRef}
+                  value={text}
+                  onChangeText={onChangeText}
+                  placeholder={editing ? 'Edit message…' : 'Message…'}
+                  placeholderTextColor={c.textSubtle}
+                  style={[styles.input, { color: c.text }]}
+                  multiline
+                  scrollEnabled
+                  maxLength={4000}
+                />
+              </View>
+            </View>
+          )}
+
+          {hasText || editing ? (
+            <Pressable
+              key="send"
+              onPress={submit}
+              hitSlop={8}
+              style={[styles.sendButton, { backgroundColor: hasText ? c.tint : c.surfaceAlt }]}
+            >
+              <Ionicons
+                name={editing ? 'checkmark' : 'send'}
+                size={18}
+                color={hasText ? '#fff' : c.textMuted}
+              />
+            </Pressable>
+          ) : (
+            <View
+              key="mic"
+              style={styles.micHit}
+              accessibilityRole="button"
+              accessibilityLabel="Hold to record a voice message"
+              {...micPan.panHandlers}
+            >
+              {mode === 'hold' ? (
+                <Animated.View
+                  pointerEvents="none"
+                  style={[
+                    styles.lockIndicator,
+                    { backgroundColor: c.surface, borderColor: c.border },
+                    lockStyle,
+                  ]}
+                >
+                  <Ionicons name="lock-closed-outline" size={16} color={c.textMuted} />
+                  <Ionicons name="chevron-up" size={14} color={c.textMuted} />
+                </Animated.View>
+              ) : null}
+              <Animated.View
+                style={[
+                  styles.sendButton,
+                  { backgroundColor: mode === 'hold' ? c.tint : c.surfaceAlt },
+                  micStyle,
+                ]}
+              >
+                <Ionicons name="mic" size={20} color={mode === 'hold' ? '#fff' : c.tint} />
+              </Animated.View>
+            </View>
+          )}
+        </View>
+      </View>
+    );
+  }),
+);
+
+/** Pulsing red "recording" dot. */
+function RecDot({ color }: { color: string }) {
+  const pulse = useSharedValue(1);
+  useEffect(() => {
+    pulse.value = withRepeat(
+      withSequence(
+        withTiming(0.3, { duration: 500, easing: Easing.inOut(Easing.ease) }),
+        withTiming(1, { duration: 500, easing: Easing.inOut(Easing.ease) }),
+      ),
+      -1,
+      false,
+    );
+  }, [pulse]);
+  const style = useAnimatedStyle(() => ({ opacity: pulse.value }));
+  return <Animated.View style={[styles.recordingDot, { backgroundColor: color }, style]} />;
+}
+
+// ===========================================================================
+// MessageRow — memoised list cell (swipe wrapper + bubble).
+// ===========================================================================
+
+const MessageRow = memo(function MessageRow({
+  message,
+  prevAuthorId,
+  isLastMine,
+  animateIn,
+  onceAudioUrl,
+  quoted,
+  actions,
+}: {
+  message: ChatMessage;
+  prevAuthorId?: string;
+  isLastMine: boolean;
+  animateIn: boolean;
+  onceAudioUrl?: string;
+  quoted?: ChatMessage;
+  actions: RowActions;
+}) {
+  const scheme = useColorScheme() ?? 'light';
+  const c = Colors[scheme];
+  const pending = message.status === 'failed' || message.status === 'sending';
+  return (
+    <Animated.View entering={animateIn ? FadeInDown.duration(200) : undefined}>
+      <SwipeableBubble
+        isMe={message.authorId === 'me'}
+        onReply={() => actions.reply(message)}
+        accentColor={c.tint}
+        mutedColor={c.textMuted}
+        disabled={!!message.deletedAt || pending}
+      >
+        <MessageBubble
+          message={message}
+          prevAuthorId={prevAuthorId}
+          isLastMine={isLastMine}
+          quoted={quoted}
+          onLongPress={() => actions.longPress(message)}
+          onTapImage={actions.tapImage}
+          onOpenViewOnce={() => actions.openViewOnce(message)}
+          onceAudioUrl={onceAudioUrl}
+          onOnceAudioEnd={actions.onceAudioEnded}
+          onPressFailed={() => actions.pressFailed(message)}
+        />
+      </SwipeableBubble>
+    </Animated.View>
+  );
+});
 
 // ===========================================================================
 // SwipeableBubble — slide-to-reply gesture wrapper.
@@ -886,19 +1394,26 @@ type MessageBubbleProps = {
   quoted?: ChatMessage;
   onLongPress: () => void;
   onTapImage: (uri: string) => void;
-  /** Fires when a view-once media is opened (image tapped, or audio finished
-   *  playing) so the host can mark the message destroyed. */
-  onMarkViewed: () => void;
+  /** Recipient taps a sealed view-once message. */
+  onOpenViewOnce: () => void;
+  /** One-time URL of a view-once voice note being played right now. */
+  onceAudioUrl?: string;
+  onOnceAudioEnd: () => void;
+  /** Tap on a message whose send failed (Retry / Delete). */
+  onPressFailed: () => void;
 };
 
-function MessageBubble({
+const MessageBubble = memo(function MessageBubble({
   message,
   prevAuthorId,
   isLastMine,
   quoted,
   onLongPress,
   onTapImage,
-  onMarkViewed,
+  onOpenViewOnce,
+  onceAudioUrl,
+  onOnceAudioEnd,
+  onPressFailed,
 }: MessageBubbleProps) {
   const scheme = useColorScheme() ?? 'light';
   const c = Colors[scheme];
@@ -915,23 +1430,30 @@ function MessageBubble({
   const isViewed = !!message.viewedAt;
   const isLocked = isViewOnce && !isViewed && !isMe;
   const isDestroyed = isViewOnce && isViewed;
+  // Sender never keeps the media of a view-once message either.
+  const isSenderSealed = isViewOnce && !isViewed && isMe;
   const showViewOnceLock = isViewOnce && isMe && !isDeleted;
   const viewOnceLockIcon = isViewed
     ? 'lock-open-outline'
     : 'lock-closed-outline';
   const hasReaction = !!message.reaction;
-  const showStatus = isMe && isLastMine && !isDeleted;
+  const isFailed = message.status === 'failed';
+  const isUploading =
+    message.status === 'sending' && message.kind !== 'text';
+  const showStatus = isMe && !isDeleted && (isLastMine || isFailed);
 
   const handlePress = () => {
-    if (isDeleted || isDestroyed) return;
-    if (isLocked && message.kind === 'image' && message.imageUri) {
-      // Recipient opens a view-once photo — first burn it, then show it.
-      // The image stays in the modal for as long as they keep it open
-      // and the destroyed placeholder takes over once they dismiss.
-      onMarkViewed();
-      onTapImage(message.imageUri);
+    if (isFailed) {
+      onPressFailed();
       return;
     }
+    if (isDeleted || isDestroyed) return;
+    if (isLocked) {
+      // Server burns it and hands back a one-time URL.
+      onOpenViewOnce();
+      return;
+    }
+    if (isSenderSealed) return;
     if (message.kind === 'image' && message.imageUri) {
       onTapImage(message.imageUri);
     }
@@ -980,16 +1502,17 @@ function MessageBubble({
           // Use the photo-shape bubble ONLY for plain image messages that
           // still have a visible image. Deleted / locked / destroyed
           // states fall back to the regular padded text-bubble shape.
-          message.kind === 'image' && !isDeleted && !isLocked && !isDestroyed
+          message.kind === 'image' && !isDeleted && !isLocked && !isDestroyed && !isSenderSealed
             ? styles.imageBubble
             : styles.bubble,
           isMe ? styles.bubbleMe : styles.bubbleThem,
-          (message.kind !== 'image' || isDeleted || isLocked || isDestroyed) && {
+          (message.kind !== 'image' || isDeleted || isLocked || isDestroyed || isSenderSealed) && {
             backgroundColor: isDeleted
               ? c.surfaceAlt
               : isMe
                 ? c.tint
                 : c.surface,
+            opacity: isFailed ? 0.6 : 1,
             borderColor: c.border,
             borderWidth: isDeleted || !isMe ? StyleSheet.hairlineWidth : 0,
           },
@@ -1012,6 +1535,16 @@ function MessageBubble({
               Unsent
             </ThemedText>
           </View>
+        ) : isDestroyed && onceAudioUrl ? (
+          <AudioBubble
+            uri={onceAudioUrl}
+            seed={message.id}
+            durationMs={message.audioDurationMs ?? 0}
+            tint={c.tint}
+            mutedTint={c.textMuted}
+            barBg={c.borderStrong}
+            onPlaybackEnd={onOnceAudioEnd}
+          />
         ) : isDestroyed ? (
           /* Both sides see this once a view-once message has been viewed:
              a tombstone bubble that proves the media was sent without
@@ -1022,28 +1555,45 @@ function MessageBubble({
             textColor={isMe ? 'rgba(255,255,255,0.85)' : c.textMuted}
             iconColor={isMe ? '#fff' : c.tint}
           />
+        ) : isSenderSealed ? (
+          <ViewOnceLocked
+            variant="sender"
+            kind={message.kind === 'audio' ? 'audio' : 'image'}
+            tint="#fff"
+            mutedColor="rgba(255,255,255,0.75)"
+            borderColor="rgba(255,255,255,0.5)"
+          />
         ) : isLocked ? (
           /* Receiver-side locked tile — tap reveals the media one time. */
           <ViewOnceLocked
+            variant="receiver"
             kind={message.kind === 'audio' ? 'audio' : 'image'}
             tint={c.tint}
             mutedColor={c.textMuted}
             borderColor={c.border}
           />
         ) : message.kind === 'image' && message.imageUri ? (
-          <Image
-            source={{ uri: message.imageUri }}
-            style={styles.bubbleImage}
-            contentFit="cover"
-          />
+          <View>
+            <ChatImage
+              uri={message.imageUri}
+              mediaKey={message.mediaKey}
+              style={[styles.bubbleImage, (isUploading || isFailed) && styles.bubbleImagePending]}
+            />
+            {isUploading ? (
+              <View style={styles.imageOverlay}>
+                <ActivityIndicator color="#fff" />
+              </View>
+            ) : null}
+          </View>
         ) : message.kind === 'audio' && message.audioUri ? (
           <AudioBubble
             uri={message.audioUri}
+            mediaKey={message.mediaKey}
+            seed={message.clientMsgId ?? message.id}
             durationMs={message.audioDurationMs ?? 0}
             tint={isMe ? '#fff' : c.tint}
             mutedTint={isMe ? 'rgba(255,255,255,0.7)' : c.textMuted}
             barBg={isMe ? 'rgba(255,255,255,0.25)' : c.borderStrong}
-            onPlaybackEnd={isViewOnce && !isMe ? onMarkViewed : undefined}
           />
         ) : (
           <ThemedText
@@ -1086,23 +1636,37 @@ function MessageBubble({
       ) : null}
     </View>
   );
-}
+});
 
 // ===========================================================================
 // ViewOnceLocked — receiver-side "Tap to view" tile for view-once media.
 // ===========================================================================
 
 function ViewOnceLocked({
+  variant,
   kind,
   tint,
   mutedColor,
   borderColor,
 }: {
+  variant: 'receiver' | 'sender';
   kind: 'image' | 'audio';
   tint: string;
   mutedColor: string;
   borderColor: string;
 }) {
+  const title =
+    variant === 'sender'
+      ? kind === 'audio'
+        ? 'Voice message'
+        : 'Photo'
+      : `Tap to ${kind === 'audio' ? 'listen' : 'view'}`;
+  const subtitle =
+    variant === 'sender'
+      ? `${kind === 'audio' ? 'Listen' : 'View'} once · Not opened yet`
+      : kind === 'audio'
+        ? 'Listen once'
+        : 'View once';
   return (
     <View style={styles.viewOnceLocked}>
       <View
@@ -1119,10 +1683,10 @@ function ViewOnceLocked({
       </View>
       <View style={styles.viewOnceLockedText}>
         <ThemedText style={[styles.viewOnceLockedTitle, { color: tint }]}>
-          Tap to {kind === 'audio' ? 'listen' : 'view'}
+          {title}
         </ThemedText>
         <ThemedText style={[styles.viewOnceLockedSub, { color: mutedColor }]}>
-          {kind === 'audio' ? 'Listen once' : 'View once'}
+          {subtitle}
         </ThemedText>
       </View>
     </View>
@@ -1222,6 +1786,8 @@ function QuotedMessage({
 
 function AudioBubble({
   uri,
+  mediaKey,
+  seed,
   durationMs,
   tint,
   mutedTint,
@@ -1229,6 +1795,10 @@ function AudioBubble({
   onPlaybackEnd,
 }: {
   uri: string;
+  /** R2 key — used to mint a fresh URL when the presigned one expired. */
+  mediaKey?: string;
+  /** Stable per-message seed for the decorative waveform. */
+  seed: string;
   durationMs: number;
   tint: string;
   mutedTint: string;
@@ -1237,47 +1807,68 @@ function AudioBubble({
    *  clip after the recipient hears it. */
   onPlaybackEnd?: () => void;
 }) {
-  const player = useAudioPlayer({ uri });
-  const status = useAudioPlayerStatus(player);
+  const [freshUri, setFreshUri] = useState<string | null>(null);
+  const playUri = freshUri ?? uri;
+  const st = useVoicePlayback(playUri);
+  const [barsWidth, setBarsWidth] = useState(0);
 
-  const isPlaying = status.playing;
-  const elapsedMs = status.currentTime ? status.currentTime * 1000 : 0;
-  const totalMs =
-    status.duration && status.duration > 0
-      ? status.duration * 1000
-      : durationMs;
-
-  // Fire `onPlaybackEnd` exactly once when the player finishes.
-  const endedRef = useRef(false);
   useEffect(() => {
-    if (status.didJustFinish && !endedRef.current) {
-      endedRef.current = true;
-      onPlaybackEnd?.();
-    }
-  }, [status.didJustFinish, onPlaybackEnd]);
+    if (!onPlaybackEnd) return;
+    return voicePlayer.onFinish((finished) => {
+      if (finished === playUri) onPlaybackEnd();
+    });
+  }, [playUri, onPlaybackEnd]);
 
-  const toggle = () => {
-    if (isPlaying) {
-      player.pause();
-    } else {
-      if (status.didJustFinish || elapsedMs >= totalMs - 50) {
-        player.seekTo(0);
+  const toggle = async () => {
+    Haptics.selectionAsync();
+    try {
+      await voicePlayer.toggle(playUri);
+    } catch {
+      // Presigned URLs expire after an hour — mint a new one and retry.
+      if (mediaKey && !isLocalMediaUri(playUri)) {
+        try {
+          const token = await getFreshAccessToken();
+          if (token) {
+            const next = await refreshMediaViewUrl(token, mediaKey);
+            setFreshUri(next);
+            await voicePlayer.toggle(next);
+            return;
+          }
+        } catch {
+          /* fall through to the alert */
+        }
       }
-      player.play();
+      Alert.alert('Could not play', 'This voice message is unavailable right now.');
     }
   };
 
-  const bars = Array.from({ length: 12 }).map((_, i) => 6 + ((i * 13) % 14));
-  const playedFraction = totalMs > 0 ? Math.min(1, elapsedMs / totalMs) : 0;
+  const totalMs = st.durationMs > 0 ? st.durationMs : durationMs;
+  const playedFraction =
+    st.active && totalMs > 0 ? Math.min(1, st.positionMs / totalMs) : 0;
+  const bars = useMemo(() => waveform(seed, 28), [seed]);
+
+  const seekTo = (x: number) => {
+    if (!st.active || barsWidth <= 0 || totalMs <= 0) return;
+    const fraction = Math.max(0, Math.min(1, x / barsWidth));
+    void voicePlayer.seek(playUri, fraction * totalMs);
+  };
 
   return (
     <View style={styles.audioRow}>
-      <Pressable onPress={toggle} hitSlop={6}>
-        <Ionicons name={isPlaying ? 'pause' : 'play'} size={20} color={tint} />
+      <Pressable onPress={toggle} hitSlop={8} style={styles.audioPlayButton}>
+        {st.loading ? (
+          <ActivityIndicator size="small" color={tint} />
+        ) : (
+          <Ionicons name={st.playing ? 'pause' : 'play'} size={22} color={tint} />
+        )}
       </Pressable>
-      <View style={styles.audioBars}>
+      <Pressable
+        style={styles.audioBars}
+        onLayout={(e) => setBarsWidth(e.nativeEvent.layout.width)}
+        onPress={(e) => seekTo(e.nativeEvent.locationX)}
+      >
         {bars.map((h, i) => {
-          const filled = i / bars.length <= playedFraction;
+          const filled = (i + 0.5) / bars.length <= playedFraction;
           return (
             <View
               key={i}
@@ -1288,12 +1879,62 @@ function AudioBubble({
             />
           );
         })}
-      </View>
+      </Pressable>
       <ThemedText style={[styles.audioDuration, { color: mutedTint }]}>
-        {formatDuration(isPlaying ? elapsedMs : totalMs)}
+        {formatDuration(st.active && st.positionMs > 0 ? st.positionMs : totalMs)}
       </ThemedText>
     </View>
   );
+}
+
+/** Chat photo that re-signs its URL once if the presigned link expired. */
+function ChatImage({
+  uri,
+  mediaKey,
+  style,
+}: {
+  uri: string;
+  mediaKey?: string;
+  style: React.ComponentProps<typeof Image>['style'];
+}) {
+  const [fresh, setFresh] = useState<string | null>(null);
+  const [retried, setRetried] = useState(false);
+  const onError = () => {
+    if (retried || !mediaKey || isLocalMediaUri(uri)) return;
+    setRetried(true);
+    void getFreshAccessToken()
+      .then((token) => (token ? refreshMediaViewUrl(token, mediaKey) : null))
+      .then((next) => {
+        if (next) setFresh(next);
+      })
+      .catch(() => {});
+  };
+  return (
+    <Image
+      source={{ uri: fresh ?? uri }}
+      style={style}
+      contentFit="cover"
+      onError={onError}
+    />
+  );
+}
+
+/** Deterministic pseudo-waveform so every note looks distinct but stable. */
+function waveform(seed: string, count: number): number[] {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  const out: number[] = [];
+  for (let i = 0; i < count; i++) {
+    h ^= h << 13;
+    h ^= h >>> 17;
+    h ^= h << 5;
+    const r = ((h >>> 0) % 1000) / 1000;
+    out.push(5 + Math.round(r * 17));
+  }
+  return out;
 }
 
 // ===========================================================================
@@ -1314,6 +1955,11 @@ function StatusLabel({
   let color = mutedColor;
 
   switch (status) {
+    case 'failed':
+      label = 'Not sent · Tap to retry';
+      icon = 'alert-circle';
+      color = '#EF4444';
+      break;
     case 'sending':
       label = 'Sending…';
       icon = 'time-outline';
@@ -1588,80 +2234,6 @@ function ReplyPreviewBar({
   );
 }
 
-// ===========================================================================
-// RecordingComposer — replaces the input row while voice recording.
-// ===========================================================================
-
-function RecordingComposer({
-  ms,
-  onCancel,
-  onSend,
-  cancelColor,
-  sendColor,
-  barColor,
-  borderColor,
-  textColor,
-  mutedColor,
-}: {
-  ms: number;
-  onCancel: () => void;
-  onSend: () => void;
-  cancelColor: string;
-  sendColor: string;
-  barColor: string;
-  borderColor: string;
-  textColor: string;
-  mutedColor: string;
-}) {
-  const pulse = useSharedValue(1);
-
-  useEffect(() => {
-    pulse.value = withRepeat(
-      withSequence(
-        withTiming(0.4, { duration: 500, easing: Easing.inOut(Easing.ease) }),
-        withTiming(1, { duration: 500, easing: Easing.inOut(Easing.ease) }),
-      ),
-      -1,
-      false,
-    );
-  }, [pulse]);
-
-  const dotStyle = useAnimatedStyle(() => ({ opacity: pulse.value }));
-
-  return (
-    <View style={styles.composerRow}>
-      <Pressable onPress={onCancel} hitSlop={8} style={styles.composerIcon}>
-        <Ionicons name="trash-outline" size={24} color={cancelColor} />
-      </Pressable>
-
-      <View
-        style={[
-          styles.recordingBar,
-          { backgroundColor: barColor, borderColor },
-        ]}
-      >
-        <Animated.View
-          style={[styles.recordingDot, { backgroundColor: cancelColor }, dotStyle]}
-        />
-        <ThemedText style={[styles.recordingTimer, { color: textColor }]}>
-          {formatDuration(ms)}
-        </ThemedText>
-        <ThemedText style={[styles.recordingHint, { color: mutedColor }]}>
-          Recording…
-        </ThemedText>
-      </View>
-
-      <Pressable
-        onPress={onSend}
-        hitSlop={8}
-        style={[styles.sendButton, { backgroundColor: sendColor }]}
-      >
-        <Ionicons name="send" size={18} color="#fff" />
-      </Pressable>
-    </View>
-  );
-}
-
 function formatDuration(ms: number): string {
   const total = Math.floor(ms / 1000);
   const m = Math.floor(total / 60);
@@ -1702,6 +2274,7 @@ const styles = StyleSheet.create({
     position: 'relative',
   },
   headerAvatarInitial: { fontSize: 15, fontWeight: '700' },
+  headerAvatarImage: { width: 36, height: 36, borderRadius: 18 },
   headerOnlineDot: {
     position: 'absolute',
     bottom: 0,
@@ -1721,6 +2294,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.md,
     paddingVertical: Spacing.md,
     paddingBottom: Spacing.lg,
+  },
+  listPlaceholder: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emptyThread: {
+    textAlign: 'center',
+    fontSize: 14,
   },
 
   // ── Bubbles ─────────────────────────────────────────────────────────
@@ -1769,6 +2351,12 @@ const styles = StyleSheet.create({
     width: 220,
     height: 280,
     borderRadius: Radii.lg,
+  },
+  bubbleImagePending: { opacity: 0.7 },
+  imageOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   bubbleMe: { borderBottomRightRadius: 6 },
   bubbleThem: { borderBottomLeftRadius: 6 },
@@ -1865,10 +2453,17 @@ const styles = StyleSheet.create({
     gap: Spacing.sm,
     minWidth: 180,
   },
+  audioPlayButton: {
+    width: 28,
+    height: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   audioBars: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 2,
+    justifyContent: 'space-between',
+    height: 28,
     flex: 1,
   },
   audioBar: { width: 3, borderRadius: 1.5 },
@@ -1993,6 +2588,21 @@ const styles = StyleSheet.create({
   },
   editingText: { flex: 1, fontSize: 13, fontWeight: '500' },
 
+  // ── Blocked state (replaces composer) ─────────────────────────────
+  blockedBar: {
+    alignItems: 'center',
+    gap: Spacing.sm,
+    paddingVertical: Spacing.sm,
+  },
+  blockedText: { fontSize: 13, textAlign: 'center' },
+  unblockButton: {
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: 8,
+    borderRadius: Radii.pill,
+    borderWidth: 1,
+  },
+  unblockText: { fontSize: 14, fontWeight: '600' },
+
   // ── Composer ────────────────────────────────────────────────────────
   composer: {
     paddingHorizontal: Spacing.md,
@@ -2036,6 +2646,61 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     marginBottom: 0,
   },
+
+  // ── Hold-to-record ──────────────────────────────────────────────────
+  inputRow: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    gap: Spacing.sm,
+  },
+  holdBar: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    minHeight: 42,
+    paddingHorizontal: Spacing.sm,
+  },
+  slideCancel: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 2,
+  },
+  micHit: {
+    width: 40,
+    height: 40,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  lockIndicator: {
+    position: 'absolute',
+    width: 34,
+    paddingVertical: 6,
+    borderRadius: 17,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: 'center',
+    gap: 2,
+  },
+  onceToggle: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  onceToggleText: { fontSize: 13, fontWeight: '800' },
+  recordHintBubble: {
+    alignSelf: 'flex-end',
+    marginBottom: Spacing.xs,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: 6,
+    borderRadius: Radii.pill,
+  },
+  recordHintText: { fontSize: 12, fontWeight: '600' },
 
   // ── Recording composer ──────────────────────────────────────────────
   recordingBar: {

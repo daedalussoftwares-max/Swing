@@ -23,28 +23,28 @@ type mediaReadURLBody struct {
 func ChatUploadURL(w http.ResponseWriter, r *http.Request) {
 	accountID, ok := bearer.UserIDFromContext(r.Context())
 	if !ok {
-		httpx.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Not signed in.")
+		httpx.Error(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "Not signed in.")
 		return
 	}
-	if !requireR2(w) {
+	if !requireR2(w, r) {
 		return
 	}
 
 	var body chatUploadURLBody
 	if err := httpx.DecodeJSONLenient(r, &body); err != nil {
-		httpx.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body.")
+		httpx.Error(w, r, http.StatusBadRequest, "INVALID_BODY", "Invalid request body.")
 		return
 	}
 	chatID := strings.TrimSpace(body.ChatID)
 	if chatID == "" {
-		httpx.Error(w, http.StatusBadRequest, "INVALID_INPUT", "chatId is required.")
+		httpx.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", "chatId is required.")
 		return
 	}
 
 	slot, err := common.R2.PresignChatPut(r.Context(), accountID, chatID, body.ContentType)
 	if err != nil {
 		if errors.Is(err, r2storage.ErrInvalidMIME) {
-			httpx.Error(w, http.StatusBadRequest, "INVALID_INPUT", "Use a JPEG, PNG, WebP image or audio clip.")
+			httpx.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", "Use a JPEG, PNG, WebP image or audio clip.")
 			return
 		}
 		writeServiceError(w, r, "media.chat_upload_url", err)
@@ -56,23 +56,23 @@ func ChatUploadURL(w http.ResponseWriter, r *http.Request) {
 func MediaReadURL(w http.ResponseWriter, r *http.Request) {
 	_, ok := bearer.UserIDFromContext(r.Context())
 	if !ok {
-		httpx.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Not signed in.")
+		httpx.Error(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "Not signed in.")
 		return
 	}
-	if !requireR2(w) {
+	if !requireR2(w, r) {
 		return
 	}
 
 	var body mediaReadURLBody
 	if err := httpx.DecodeJSONLenient(r, &body); err != nil {
-		httpx.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body.")
+		httpx.Error(w, r, http.StatusBadRequest, "INVALID_BODY", "Invalid request body.")
 		return
 	}
 
 	url, err := common.R2.PresignGet(r.Context(), body.MediaKey)
 	if err != nil {
 		if errors.Is(err, r2storage.ErrInvalidMediaKey) {
-			httpx.Error(w, http.StatusBadRequest, "INVALID_INPUT", "Invalid media key.")
+			httpx.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", "Invalid media key.")
 			return
 		}
 		writeServiceError(w, r, "media.read_url", err)

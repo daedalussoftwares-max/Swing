@@ -13,6 +13,10 @@ auth:
     - "YOUR_GOOGLE_WEB_CLIENT_ID.apps.googleusercontent.com"
     - "YOUR_EXPO_GO_IOS_CLIENT_ID.apps.googleusercontent.com"
 
+# Optional: verbose HTTP access logs (also SWING_DEBUG_HTTP=1)
+# logging:
+#   debug_http: true
+
 # Cloudflare R2 — avatars + status + chat (see /AVATAR-R2-SETUP.md)
 r2:
   account_id: "YOUR_CLOUDFLARE_ACCOUNT_ID"
@@ -20,3 +24,8 @@ r2:
   secret_access_key: "YOUR_R2_SECRET_ACCESS_KEY"
   bucket: "swing-media"
   public_base_url: "https://pub-xxxxxxxx.r2.dev"
+
+# Push notifications via Firebase Cloud Messaging (see /docs/PUSH-SETUP.md).
+# Leave empty to disable push. Env override: FCM_SERVICE_ACCOUNT_FILE.
+# push:
+#   fcm_service_account_file: "config/setup/local/firebase-service-account.json"

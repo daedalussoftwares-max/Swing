@@ -3,11 +3,14 @@ package httpx
 import (
 	"encoding/json"
 	"net/http"
+
+	"serving/app/pkg/requestid"
 )
 
 type APIError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	RequestID string `json:"request_id,omitempty"`
 }
 
 func JSON(w http.ResponseWriter, status int, v any) {
@@ -16,9 +19,16 @@ func JSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func Error(w http.ResponseWriter, status int, code, message string) {
+func Error(w http.ResponseWriter, r *http.Request, status int, code, message string) {
+	reqID := ""
+	if r != nil {
+		reqID = requestid.FromContext(r.Context())
+		if reqID != "" {
+			w.Header().Set(requestid.Header, reqID)
+		}
+	}
 	JSON(w, status, map[string]any{
-		"error": APIError{Code: code, Message: message},
+		"error": APIError{Code: code, Message: message, RequestID: reqID},
 	})
 }
 

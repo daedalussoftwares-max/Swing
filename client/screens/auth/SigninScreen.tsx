@@ -35,6 +35,7 @@ import {
 } from '@/lib/google-user-messages';
 
 import { AuthField } from '@/components/auth-field';
+import { DevErrorFootnote } from '@/components/dev-error-footnote';
 
 export default function SigninScreen() {
   const scheme = useColorScheme() ?? 'light';
@@ -47,10 +48,12 @@ export default function SigninScreen() {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [debugErr, setDebugErr] = useState<unknown>(null);
   const [submitting, setSubmitting] = useState(false);
 
   const handleSubmit = async () => {
     setError(null);
+    setDebugErr(null);
     setSubmitting(true);
     try {
       const user = await signInWithEmail(email, password);
@@ -59,6 +62,7 @@ export default function SigninScreen() {
         user.profileComplete ? '/(tabs)' : '/(auth)/profile-setup',
       );
     } catch (e) {
+      setDebugErr(e);
       setError(humanizeAuthError(e, 'Login failed.'));
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
     } finally {
@@ -68,6 +72,7 @@ export default function SigninScreen() {
 
   const handleGoogle = async () => {
     setError(null);
+    setDebugErr(null);
     if (google.setupError) {
       setError(google.setupError);
       return;
@@ -81,6 +86,7 @@ export default function SigninScreen() {
       );
     } catch (e) {
       if (isGoogleSignInCancelled(e)) return;
+      setDebugErr(e);
       setError(humanizeGoogleError(e, humanizeAuthError(e, 'Could not sign in.')));
     } finally {
       setSubmitting(false);
@@ -166,6 +172,7 @@ export default function SigninScreen() {
                 </ThemedText>
               </View>
             ) : null}
+            <DevErrorFootnote error={debugErr} />
 
             <Pressable
               onPress={handleSubmit}

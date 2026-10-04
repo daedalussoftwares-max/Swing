@@ -23,7 +23,9 @@ import {
   readTokens,
   writeTokens,
 } from '@/lib/api/token-storage';
+import { getFreshAccessToken, onSessionExpired } from '@/lib/api/session';
 import { uploadAndSaveAvatar } from '@/lib/upload-media';
+import { unregisterPushToken } from '@/lib/push/unregister';
 
 // ── Public types ──────────────────────────────────────────────────────────
 
@@ -42,6 +44,8 @@ type AuthContextValue = AuthState & {
   saveProfile: (patch: ProfilePatchBody) => Promise<AuthUser>;
   uploadAvatar: (localUri: string, mimeType?: string) => Promise<AuthUser>;
   deleteAccountRemote: () => Promise<void>;
+  /** Reload /v1/me (e.g. after spending a plane). */
+  refreshUser: () => Promise<AuthUser | null>;
 };
 
 // ── Validation ────────────────────────────────────────────────────────────
@@ -111,6 +115,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     status: 'loading',
     user: null,
   });
+
+  // Refresh token rejected mid-session (revoked / expired) → back to login.
+  useEffect(
+    () =>
+      onSessionExpired(() => {
+        setState({ status: 'signed-out', user: null });
+      }),
+    [],
+  );
 
   useEffect(() => {
     (async () => {
@@ -220,6 +233,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const signOut = useCallback(async () => {
+    await unregisterPushToken(); // before tokens are cleared
     const { refreshToken } = await readTokens();
     if (refreshToken) {
       try {
@@ -233,7 +247,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const saveProfile = useCallback(async (patch: ProfilePatchBody) => {
-    const { accessToken } = await readTokens();
+    const accessToken = await getFreshAccessToken();
     if (!accessToken) {
       throw new AuthError('INVALID_TOKEN', 'Session expired. Please sign in again.');
     }
@@ -249,7 +263,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const uploadAvatar = useCallback(async (localUri: string, mimeType?: string) => {
-    const { accessToken } = await readTokens();
+    const accessToken = await getFreshAccessToken();
     if (!accessToken) {
       throw new AuthError('INVALID_TOKEN', 'Session expired. Please sign in again.');
     }
@@ -261,6 +275,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (e instanceof AuthError) throw e;
       if (e instanceof ApiError) throw mapApiError(e);
       throw new AuthError('UNKNOWN', 'Something went wrong. Please try again.');
+    }
+  }, []);
+
+  const refreshUser = useCallback(async (): Promise<AuthUser | null> => {
+    const accessToken = await getFreshAccessToken();
+    if (!accessToken) {
+      setState({ status: 'signed-out', user: null });
+      return null;
+    }
+    try {
+      const user = await authApi.getMe(accessToken);
+      setState({ status: 'signed-in', user });
+      return user;
+    } catch {
+      await clearTokens();
+      setState({ status: 'signed-out', user: null });
+      return null;
     }
   }, []);
 
@@ -299,6 +330,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         saveProfile,
         uploadAvatar,
         deleteAccountRemote,
+        refreshUser,
       };
     }
     if (state.status === 'signed-out') {
@@ -312,6 +344,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         saveProfile,
         uploadAvatar,
         deleteAccountRemote,
+        refreshUser,
       };
     }
     return {
@@ -324,6 +357,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       saveProfile,
       uploadAvatar,
       deleteAccountRemote,
+      refreshUser,
     };
   }, [
     state,
@@ -334,6 +368,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     saveProfile,
     uploadAvatar,
     deleteAccountRemote,
+    refreshUser,
   ]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

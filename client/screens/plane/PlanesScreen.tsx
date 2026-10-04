@@ -1,86 +1,107 @@
 /**
- * Outbox / Planes screen — list of every plane the local user has sent.
+ * Outbox / Planes screen — every plane the local user has sent, with
+ * live delivery status (patched in place by `plane.outbox.updated`).
  *
  * Reachable from:
  *   - The plane icon on the home header (next to the bell)
  *   - The "Planes" segment on the profile tab
  *
- * The list is grouped into just TWO buckets so the user sees what
- * matters:
- *   1. ✅ Accepted  (green) — planes that landed and started a chat
- *   2. 🟡 On air    (yellow) — flying / pending
+ * Buckets:
+ *   1. In the air — flying (looking for someone, animated dots) or
+ *      delivered to someone and waiting on them
+ *   2. Accepted   — landed and started a chat
+ *   3. Expired    — 24h passed without anyone accepting
  *
- * Rejected / expired planes are intentionally hidden from this view —
- * they live in the data but don't clutter the outbox.
- *
- * Tapping a row opens the existing plane-detail screen in READ-ONLY mode
- * (no accept / reject buttons) — the route honours a `?readOnly=1`
- * query string.
+ * Each row shows "passed on N times" when recipients rejected it and it
+ * flew on. Tapping a row opens plane-detail in read-only mode.
  */
 
 import { Ionicons } from '@/lib/native/vector-icons';
 import { useRouter } from '@/lib/router';
-import { useMemo } from 'react';
-import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  View,
+} from 'react-native';
+import Animated, { FadeIn, LinearTransition } from 'react-native-reanimated';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { Avatar } from '@/components/avatar';
+import { describeSentFilters } from '@/components/plane-filter-model';
+import { passedOnLabel, PlaneStatusPill } from '@/components/plane-status';
 import { SwipeSafePressable } from '@/components/swipe-safe-pressable';
 import { ThemedText } from '@/components/themed-text';
 import { Colors, Radii, Spacing } from '@/constants/theme';
 import { useColorScheme } from '@/hooks/use-color-scheme';
+import type { LiveSentPlane } from '@/lib/planes-mapper';
 import { useSentPlanes } from '@/lib/sent-planes-context';
-import type { SentPlane } from '@/types/sent-plane';
 
 export default function PlanesScreen() {
   const scheme = useColorScheme() ?? 'light';
   const c = Colors[scheme];
   const router = useRouter();
-  const { sentPlanes } = useSentPlanes();
+  const { sentPlanes, refresh } = useSentPlanes();
+  const [refreshing, setRefreshing] = useState(false);
 
-  // Partition into the two visible buckets — rejected/expired planes
-  // are intentionally excluded from this screen.
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await refresh();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [refresh]);
+
   const buckets = useMemo(() => {
-    const accepted: SentPlane[] = [];
-    const onAir: SentPlane[] = [];
+    const inAir: LiveSentPlane[] = [];
+    const accepted: LiveSentPlane[] = [];
+    const expired: LiveSentPlane[] = [];
     for (const p of sentPlanes) {
       if (p.status === 'accepted') accepted.push(p);
-      else if (p.status === 'flying' || p.status === 'pending') onAir.push(p);
+      else if (p.status === 'flying' || p.status === 'pending') inAir.push(p);
+      else expired.push(p);
     }
-    const sortNewestFirst = (a: SentPlane, b: SentPlane) =>
+    const newestFirst = (a: LiveSentPlane, b: LiveSentPlane) =>
       new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime();
-    accepted.sort(sortNewestFirst);
-    onAir.sort(sortNewestFirst);
-    return { accepted, onAir };
+    inAir.sort(newestFirst);
+    accepted.sort(newestFirst);
+    expired.sort(newestFirst);
+    return { inAir, accepted, expired };
   }, [sentPlanes]);
 
-  const visibleCount = buckets.accepted.length + buckets.onAir.length;
-
-  const openPlane = (plane: SentPlane) => {
-    // Real planes have an "incoming" detail route — for the user's own
-    // outbox we just reuse the same route in read-only mode.
-    router.push({
-      pathname: '/plane/[id]',
-      params: { id: plane.id, readOnly: '1' },
-    });
-  };
+  const openPlane = useCallback(
+    (plane: LiveSentPlane) => {
+      if (plane.optimistic) return;
+      router.push({
+        pathname: '/plane/[id]',
+        params: { id: plane.id, readOnly: '1' },
+      });
+    },
+    [router],
+  );
 
   return (
     <SafeAreaView
       edges={['top']}
       style={[styles.root, { backgroundColor: c.background }]}
     >
-      {/* Header */}
       <View style={styles.header}>
         <Pressable onPress={() => router.back()} hitSlop={12}>
           <Ionicons name="arrow-back" size={24} color={c.text} />
         </Pressable>
-        <View style={{ flex: 1 }}>
+        <View style={styles.flex}>
           <ThemedText style={styles.title}>Your planes</ThemedText>
         </View>
       </View>
 
-      {visibleCount === 0 ? (
+      {sentPlanes.length === 0 ? (
         <View style={styles.empty}>
           <View style={[styles.emptyIcon, { backgroundColor: c.surfaceAlt }]}>
             <Ionicons name="paper-plane-outline" size={32} color={c.tint} />
@@ -94,7 +115,23 @@ export default function PlanesScreen() {
         <ScrollView
           contentContainerStyle={styles.listContent}
           showsVerticalScrollIndicator={false}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={c.tint}
+              colors={[c.tint]}
+            />
+          }
         >
+          <Section
+            title="In the air"
+            tint={c.tint}
+            icon="paper-plane"
+            items={buckets.inAir}
+            emptyHint="No planes in flight. Send another one."
+            onOpen={openPlane}
+          />
           <Section
             title="Accepted"
             tint={c.success}
@@ -104,11 +141,10 @@ export default function PlanesScreen() {
             onOpen={openPlane}
           />
           <Section
-            title="On air"
-            tint={c.warning}
-            icon="paper-plane"
-            items={buckets.onAir}
-            emptyHint="No planes in flight. Send another one."
+            title="Expired"
+            tint={c.textSubtle}
+            icon="time-outline"
+            items={buckets.expired}
             onOpen={openPlane}
           />
         </ScrollView>
@@ -130,30 +166,23 @@ function Section({
   title: string;
   tint: string;
   icon: keyof typeof Ionicons.glyphMap;
-  items: SentPlane[];
+  items: LiveSentPlane[];
   emptyHint?: string;
-  onOpen: (plane: SentPlane) => void;
+  onOpen: (plane: LiveSentPlane) => void;
 }) {
   const scheme = useColorScheme() ?? 'light';
   const c = Colors[scheme];
 
-  // Hide entirely when there are no items AND no emptyHint provided.
   if (items.length === 0 && !emptyHint) return null;
 
   return (
-    <View style={styles.section}>
+    <Animated.View style={styles.section} layout={LinearTransition}>
       <View style={styles.sectionHeader}>
-        <View style={[styles.sectionDot, { backgroundColor: tint }]} />
-        <Ionicons name={icon} size={16} color={tint} />
+        <Ionicons name={icon} size={15} color={tint} />
         <ThemedText style={[styles.sectionTitle, { color: tint }]}>
           {title}
         </ThemedText>
-        <View
-          style={[
-            styles.sectionCount,
-            { backgroundColor: tint + '22' },
-          ]}
-        >
+        <View style={[styles.sectionCount, { backgroundColor: tint + '22' }]}>
           <ThemedText style={[styles.sectionCountText, { color: tint }]}>
             {items.length}
           </ThemedText>
@@ -183,92 +212,103 @@ function Section({
               key={plane.id}
               plane={plane}
               isLast={i === items.length - 1}
-              onPress={() => onOpen(plane)}
+              onOpen={onOpen}
             />
           ))}
         </View>
       )}
-    </View>
+    </Animated.View>
   );
 }
 
-function PlaneRow({
+const PlaneRow = memo(function PlaneRow({
   plane,
   isLast,
-  onPress,
+  onOpen,
 }: {
-  plane: SentPlane;
+  plane: LiveSentPlane;
   isLast: boolean;
-  onPress: () => void;
+  onOpen: (plane: LiveSentPlane) => void;
 }) {
   const scheme = useColorScheme() ?? 'light';
   const c = Colors[scheme];
 
-  const filterLabel = (() => {
-    if (!plane.filters) return null;
-    const parts: string[] = [];
-    if (plane.filters.country) parts.push(plane.filters.country);
-    if (plane.filters.radiusKm) parts.push(`${plane.filters.radiusKm}km`);
-    if (plane.filters.ageRange) {
-      const [a, b] = plane.filters.ageRange;
-      parts.push(`${a}–${b}`);
-    }
-    return parts.join(' · ');
-  })();
+  const filterLabel = describeSentFilters(plane.filters);
+  const passed = passedOnLabel(plane);
+  const recipientName = plane.recipient?.name ?? plane.recipientName;
+  const showRecipient = !!recipientName && plane.status !== 'flying';
 
   return (
-    <SwipeSafePressable
-      onPress={onPress}
-      style={[
-        styles.row,
-        !isLast && {
-          borderBottomColor: c.border,
-          borderBottomWidth: StyleSheet.hairlineWidth,
-        },
-      ]}
-    >
-      {/* Recipient avatar — the system always pairs the plane with a
-          real user, so we always have someone to show. */}
-      <Avatar
-        name={plane.recipient?.name ?? plane.recipientName ?? '?'}
-        uri={plane.recipient?.avatarUrl}
-        size={40}
-      />
+    <Animated.View entering={FadeIn.duration(220)}>
+      <SwipeSafePressable
+        onPress={() => onOpen(plane)}
+        disabled={plane.optimistic}
+        style={[
+          styles.row,
+          !isLast && {
+            borderBottomColor: c.border,
+            borderBottomWidth: StyleSheet.hairlineWidth,
+          },
+        ]}
+      >
+        {showRecipient ? (
+          <Avatar name={recipientName ?? '?'} uri={plane.recipient?.avatarUrl} size={40} />
+        ) : (
+          <View style={[styles.flyingAvatar, { backgroundColor: c.tintMuted }]}>
+            <Ionicons
+              name={plane.status === 'expired' ? 'time-outline' : 'paper-plane'}
+              size={18}
+              color={plane.status === 'expired' ? c.textSubtle : c.tint}
+            />
+          </View>
+        )}
 
-      <View style={styles.rowText}>
-        {/* Per-row status label intentionally removed — the section
-            header already calls out Accepted vs On air, so repeating
-            it on every row is just noise. We keep only the recipient +
-            send time on top. */}
-        <View style={styles.rowTop}>
-          <ThemedText
-            style={styles.rowRecipient}
-            numberOfLines={1}
-          >
-            {plane.recipientName
-              ? `To ${plane.recipientName}`
-              : 'Looking for a recipient…'}
+        <View style={styles.rowText}>
+          <View style={styles.rowTop}>
+            <View style={styles.flex}>
+              <PlaneStatusPill plane={plane} />
+            </View>
+            <ThemedText style={[styles.rowTime, { color: c.textMuted }]}>
+              {plane.optimistic ? 'now' : timeAgo(plane.sentAt)}
+            </ThemedText>
+          </View>
+
+          <ThemedText style={styles.rowMessage} numberOfLines={3}>
+            {plane.message}
           </ThemedText>
-          <ThemedText style={[styles.rowTime, { color: c.textMuted }]}>
-            {timeAgo(plane.sentAt)}
-          </ThemedText>
+
+          {filterLabel || passed ? (
+            <View style={styles.metaRow}>
+              {passed ? (
+                <View style={styles.metaItem}>
+                  <Ionicons name="return-up-forward" size={12} color={c.textMuted} />
+                  <ThemedText style={[styles.rowMeta, { color: c.textMuted }]}>
+                    {passed}
+                  </ThemedText>
+                </View>
+              ) : null}
+              {filterLabel ? (
+                <View style={styles.metaItem}>
+                  <Ionicons name="options-outline" size={12} color={c.textSubtle} />
+                  <ThemedText
+                    style={[styles.rowMeta, { color: c.textSubtle }]}
+                    numberOfLines={1}
+                  >
+                    {filterLabel}
+                  </ThemedText>
+                </View>
+              ) : null}
+            </View>
+          ) : null}
         </View>
 
-        <ThemedText style={styles.rowMessage} numberOfLines={3}>
-          {plane.message}
-        </ThemedText>
-
-        {filterLabel ? (
-          <ThemedText style={[styles.rowMeta, { color: c.textMuted }]}>
-            {filterLabel}
-          </ThemedText>
+        {!plane.optimistic ? (
+          <Ionicons name="chevron-forward" size={16} color={c.textSubtle} />
         ) : null}
-      </View>
-
-      <Ionicons name="chevron-forward" size={16} color={c.textSubtle} />
-    </SwipeSafePressable>
+      </SwipeSafePressable>
+    </Animated.View>
   );
-}
+});
 
 function timeAgo(iso: string): string {
   const ms = Date.now() - new Date(iso).getTime();
@@ -284,6 +324,7 @@ function timeAgo(iso: string): string {
 
 const styles = StyleSheet.create({
   root: { flex: 1 },
+  flex: { flex: 1 },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -297,7 +338,7 @@ const styles = StyleSheet.create({
   listContent: {
     paddingHorizontal: Spacing.lg,
     paddingBottom: Spacing.xl,
-    gap: Spacing.lg,
+    gap: Spacing.xl,
   },
 
   section: { gap: Spacing.sm },
@@ -306,12 +347,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 6,
     paddingLeft: Spacing.xs,
-  },
-  sectionDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    marginRight: 2,
   },
   sectionTitle: {
     fontSize: 13,
@@ -345,20 +380,24 @@ const styles = StyleSheet.create({
     gap: Spacing.md,
     padding: Spacing.md,
   },
-  rowText: { flex: 1, gap: 4 },
+  flyingAvatar: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  rowText: { flex: 1, gap: 6 },
   rowTop: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: Spacing.sm,
   },
-  rowRecipient: {
-    flex: 1,
-    fontSize: 13,
-    fontWeight: '700',
-  },
-  rowTime: { fontSize: 11, marginLeft: Spacing.sm },
+  rowTime: { fontSize: 11 },
   rowMessage: { fontSize: 14, lineHeight: 20 },
-  rowMeta: { fontSize: 11, marginTop: 2 },
+  metaRow: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.md },
+  metaItem: { flexDirection: 'row', alignItems: 'center', gap: 4, flexShrink: 1 },
+  rowMeta: { fontSize: 11 },
 
   empty: {
     flex: 1,

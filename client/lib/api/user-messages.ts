@@ -25,6 +25,12 @@ const BY_CODE: Record<string, string> = {
   STORAGE_NOT_CONFIGURED:
     'Photo upload is not set up on the server yet. Try again later.',
   UPLOAD_FAILED: 'Could not upload photo. Try again.',
+  NO_CANDIDATES:
+    'No one can receive your plane right now. Make sure they finished profile setup, are not already your friend, and try again.',
+  NO_PLANES: "You're out of planes. Watch an ad or come back later.",
+  NOT_FOUND: 'Not found.',
+  FORBIDDEN: "You can't do that.",
+  EXPIRED: 'This plane has expired.',
 };
 
 /** Codes where the server message is already safe to show verbatim. */
@@ -44,6 +50,11 @@ const TRUST_SERVER_MESSAGE = new Set([
   'GOOGLE_NOT_CONFIGURED',
   'STORAGE_NOT_CONFIGURED',
   'UPLOAD_FAILED',
+  'NO_CANDIDATES',
+  'NO_PLANES',
+  'NOT_FOUND',
+  'FORBIDDEN',
+  'EXPIRED',
 ]);
 
 export function messageForApiCode(

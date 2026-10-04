@@ -13,6 +13,7 @@ export type AuthUser = {
   country?: string;
   avatarUrl?: string;
   profileComplete: boolean;
+  planesRemaining?: number;
   createdAt: string;
 };
 

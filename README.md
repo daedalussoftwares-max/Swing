@@ -72,8 +72,9 @@ Reload the installed Swing app on the device — it connects to Metro automatica
 
 ### Env note
 
-- Physical phone: `EXPO_PUBLIC_API_URL=http://YOUR_MAC_IP:8080` (not `localhost`)
+- Physical phones: `SWING_API_URL=http://YOUR_MAC_IP:8080` in `client/.env` (not `localhost`)
 - Android emulator: `http://10.0.2.2:8080`
+- **Two phones (iPhone + Android):** see **[docs/LOCAL-DEVICE-TESTING.md](docs/LOCAL-DEVICE-TESTING.md)**
 
 ## Running the backend (serving API)
 

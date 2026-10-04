@@ -10,9 +10,11 @@
  */
 
 import { useRouter } from '@/lib/router';
+import { useState } from 'react';
 import { Alert } from 'react-native';
 
 import { ActionSheet, type ActionSheetItem } from '@/components/action-sheet';
+import { ReportSheet } from '@/components/report-sheet';
 import { useChats } from '@/lib/chats-context';
 
 type Props = {
@@ -35,6 +37,7 @@ export function ChatActionMenu({ chatId, visible, onClose, popOnDelete }: Props)
     unblockChat,
   } = useChats();
 
+  const [reporting, setReporting] = useState(false);
   const chat = chatId ? getChat(chatId) : undefined;
   if (!chat) {
     return (
@@ -87,7 +90,7 @@ export function ChatActionMenu({ chatId, visible, onClose, popOnDelete }: Props)
         } else {
           confirmAndRun(
             `Block ${chat.partner.name}?`,
-            "They won't be able to send you new planes or messages.",
+            "You won't receive their messages or planes, and they won't see when you're online. They won't be notified.",
             true,
             () => blockChat(chat.id),
           );
@@ -99,25 +102,19 @@ export function ChatActionMenu({ chatId, visible, onClose, popOnDelete }: Props)
       icon: 'flag-outline',
       label: 'Report',
       onPress: () => {
-        confirmAndRun(
-          'Report this chat?',
-          "Our team will review and take action if needed. You'll be kept anonymous.",
-          false,
-          () => {
-            // TODO: send report event when backend is wired up.
-          },
-        );
+        onClose();
+        setReporting(true);
       },
     },
     {
       id: 'delete',
       icon: 'trash-outline',
-      label: 'Delete chat',
+      label: 'Delete chat for both',
       destructive: true,
       onPress: () => {
         confirmAndRun(
-          'Delete this chat?',
-          "You'll lose the entire conversation. This can't be undone.",
+          'Delete chat for both?',
+          `All messages will be deleted for you and ${chat.partner.name}, and you'll no longer be connected. This can't be undone.`,
           true,
           () => {
             deleteChat(chat.id);
@@ -128,5 +125,16 @@ export function ChatActionMenu({ chatId, visible, onClose, popOnDelete }: Props)
     },
   ];
 
-  return <ActionSheet visible={visible} items={items} onClose={onClose} />;
+  return (
+    <>
+      <ActionSheet visible={visible} items={items} onClose={onClose} />
+      <ReportSheet
+        visible={reporting}
+        userId={chat.partner.id}
+        userName={chat.partner.name}
+        chatId={chat.id}
+        onClose={() => setReporting(false)}
+      />
+    </>
+  );
 }

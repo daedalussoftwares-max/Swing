@@ -22,10 +22,11 @@ type statusCreateBody struct {
 	Kind        string `json:"kind"`
 }
 
-func requireR2(w http.ResponseWriter) bool {
+func requireR2(w http.ResponseWriter, r *http.Request) bool {
 	if common.R2 == nil {
 		httpx.Error(
 			w,
+			r,
 			http.StatusServiceUnavailable,
 			"STORAGE_NOT_CONFIGURED",
 			"Media upload is not configured on the server.",
@@ -54,10 +55,10 @@ func attachStatusViewURLs(ctx context.Context, items []status.Item) ([]status.It
 func StatusUploadURL(w http.ResponseWriter, r *http.Request) {
 	accountID, ok := bearer.UserIDFromContext(r.Context())
 	if !ok {
-		httpx.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Not signed in.")
+		httpx.Error(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "Not signed in.")
 		return
 	}
-	if !requireR2(w) {
+	if !requireR2(w, r) {
 		return
 	}
 
@@ -67,7 +68,7 @@ func StatusUploadURL(w http.ResponseWriter, r *http.Request) {
 	slot, err := common.R2.PresignStatusPut(r.Context(), accountID, body.ContentType)
 	if err != nil {
 		if errors.Is(err, r2storage.ErrInvalidMIME) {
-			httpx.Error(w, http.StatusBadRequest, "INVALID_INPUT", "Use a JPEG, PNG, WebP image or MP4 video.")
+			httpx.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", "Use a JPEG, PNG, WebP image or MP4 video.")
 			return
 		}
 		writeServiceError(w, r, "status.upload_url", err)
@@ -79,7 +80,7 @@ func StatusUploadURL(w http.ResponseWriter, r *http.Request) {
 func ListMyStatus(w http.ResponseWriter, r *http.Request) {
 	accountID, ok := bearer.UserIDFromContext(r.Context())
 	if !ok {
-		httpx.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Not signed in.")
+		httpx.Error(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "Not signed in.")
 		return
 	}
 	items, err := common.Status.ListMine(r.Context(), accountID)
@@ -98,12 +99,12 @@ func ListMyStatus(w http.ResponseWriter, r *http.Request) {
 func ListAccountStatus(w http.ResponseWriter, r *http.Request) {
 	_, ok := bearer.UserIDFromContext(r.Context())
 	if !ok {
-		httpx.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Not signed in.")
+		httpx.Error(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "Not signed in.")
 		return
 	}
 	accountID, err := stdidParsePath(r.PathValue("accountId"))
 	if err != nil {
-		httpx.Error(w, http.StatusBadRequest, "INVALID_INPUT", "Invalid account id.")
+		httpx.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", "Invalid account id.")
 		return
 	}
 	items, err := common.Status.ListForAccount(r.Context(), accountID)
@@ -122,12 +123,12 @@ func ListAccountStatus(w http.ResponseWriter, r *http.Request) {
 func CreateStatus(w http.ResponseWriter, r *http.Request) {
 	accountID, ok := bearer.UserIDFromContext(r.Context())
 	if !ok {
-		httpx.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Not signed in.")
+		httpx.Error(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "Not signed in.")
 		return
 	}
 	var body statusCreateBody
 	if err := httpx.DecodeJSONLenient(r, &body); err != nil {
-		httpx.Error(w, http.StatusBadRequest, "INVALID_BODY", "Invalid request body.")
+		httpx.Error(w, r, http.StatusBadRequest, "INVALID_BODY", "Invalid request body.")
 		return
 	}
 	item, err := common.Status.Create(r.Context(), accountID, status.CreateInput{
@@ -137,7 +138,7 @@ func CreateStatus(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if errors.Is(err, status.ErrInvalidInput) {
-			httpx.Error(w, http.StatusBadRequest, "INVALID_INPUT", "Invalid status media.")
+			httpx.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", "Invalid status media.")
 			return
 		}
 		writeServiceError(w, r, "status.create", err)
@@ -155,17 +156,17 @@ func CreateStatus(w http.ResponseWriter, r *http.Request) {
 func DeleteStatus(w http.ResponseWriter, r *http.Request) {
 	accountID, ok := bearer.UserIDFromContext(r.Context())
 	if !ok {
-		httpx.Error(w, http.StatusUnauthorized, "UNAUTHORIZED", "Not signed in.")
+		httpx.Error(w, r, http.StatusUnauthorized, "UNAUTHORIZED", "Not signed in.")
 		return
 	}
 	itemID, err := stdidParsePath(r.PathValue("id"))
 	if err != nil {
-		httpx.Error(w, http.StatusBadRequest, "INVALID_INPUT", "Invalid status id.")
+		httpx.Error(w, r, http.StatusBadRequest, "INVALID_INPUT", "Invalid status id.")
 		return
 	}
 	if err := common.Status.Delete(r.Context(), accountID, itemID); err != nil {
 		if errors.Is(err, status.ErrNotFound) {
-			httpx.Error(w, http.StatusNotFound, "NOT_FOUND", "Status not found.")
+			httpx.Error(w, r, http.StatusNotFound, "NOT_FOUND", "Status not found.")
 			return
 		}
 		writeServiceError(w, r, "status.delete", err)

@@ -87,22 +87,3 @@ func finalizeRealAcceptTx(
 	}
 	return createChatTx(ctx, tx, senderID, recipientID, planeID)
 }
-
-func spendPlaneTx(ctx context.Context, tx *sql.Tx, accountID stdid.UUID) error {
-	res, err := tx.ExecContext(ctx, `
-		UPDATE profile_stats
-		SET planes_remaining = planes_remaining - 1, updated_at = NOW()
-		WHERE account_id = $1 AND planes_remaining > 0
-	`, accountID)
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return ErrInsufficientPlanes
-	}
-	return nil
-}
